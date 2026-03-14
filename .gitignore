@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Config (contains tokens)
+config.yaml
+.env
+
+# Database
+sessions.db
+
+# Logs
+*.log
+daemon.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

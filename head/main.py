@@ -1,0 +1,147 @@
+"""
+Remote Claude - Main Entry Point
+
+Starts the Head Node with configured bots (Discord, Telegram, or both).
+"""
+
+import asyncio
+import logging
+import signal
+import sys
+from pathlib import Path
+from typing import Optional
+
+from head.config import load_config, Config
+from head.ssh_manager import SSHManager
+from head.session_router import SessionRouter
+from head.daemon_client import DaemonClient
+from head.bot_discord import DiscordBot
+from head.bot_telegram import TelegramBot
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("remote-claude")
+
+
+async def main(config_path: str = "config.yaml") -> None:
+    """Main entry point."""
+    # Load config
+    try:
+        config = load_config(config_path)
+    except FileNotFoundError:
+        logger.error(f"Config file not found: {config_path}")
+        logger.error("Copy config.example.yaml to config.yaml and edit it.")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Failed to load config: {e}")
+        sys.exit(1)
+
+    if not config.machines:
+        logger.error("No machines configured in config.yaml")
+        sys.exit(1)
+
+    # Initialize shared components
+    ssh_manager = SSHManager(config)
+    session_router = SessionRouter(
+        db_path=str(Path(__file__).parent / "sessions.db")
+    )
+    daemon_client = DaemonClient()
+
+    # Track bots for cleanup
+    bots: list[DiscordBot | TelegramBot] = []
+    tasks: list[asyncio.Task[None]] = []
+
+    # Initialize Discord bot
+    discord_bot: Optional[DiscordBot] = None
+    if config.bot.discord and config.bot.discord.token:
+        try:
+            discord_bot = DiscordBot(ssh_manager, session_router, daemon_client, config)
+            bots.append(discord_bot)
+            logger.info("Discord bot configured")
+        except Exception as e:
+            logger.error(f"Failed to initialize Discord bot: {e}")
+
+    # Initialize Telegram bot
+    telegram_bot: Optional[TelegramBot] = None
+    if config.bot.telegram and config.bot.telegram.token:
+        try:
+            telegram_bot = TelegramBot(ssh_manager, session_router, daemon_client, config)
+            bots.append(telegram_bot)
+            logger.info("Telegram bot configured")
+        except Exception as e:
+            logger.error(f"Failed to initialize Telegram bot: {e}")
+
+    if not bots:
+        logger.error("No bots configured. Set discord and/or telegram tokens in config.yaml")
+        sys.exit(1)
+
+    # Graceful shutdown handler
+    shutdown_event = asyncio.Event()
+
+    def handle_shutdown(sig: signal.Signals) -> None:
+        logger.info(f"Received {sig.name}, shutting down...")
+        shutdown_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, handle_shutdown, sig)
+
+    # Start bots
+    try:
+        if discord_bot:
+            task = asyncio.create_task(discord_bot.start(), name="discord")
+            tasks.append(task)
+
+        if telegram_bot:
+            task = asyncio.create_task(telegram_bot.start(), name="telegram")
+            tasks.append(task)
+
+        logger.info(f"Remote Claude started with {len(bots)} bot(s)")
+        logger.info(f"Machines: {', '.join(config.machines.keys())}")
+        logger.info(f"Default mode: {config.default_mode}")
+
+        # Wait for shutdown signal or bot crash
+        done, pending = await asyncio.wait(
+            [asyncio.create_task(shutdown_event.wait()), *tasks],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Check if any bot crashed
+        for task in done:
+            if task.get_name() != "None" and task.exception():
+                logger.error(f"Bot {task.get_name()} crashed: {task.exception()}")
+
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+    finally:
+        # Cleanup
+        logger.info("Cleaning up...")
+
+        for bot in bots:
+            try:
+                await bot.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping bot: {e}")
+
+        await daemon_client.close()
+        await ssh_manager.close_all()
+
+        # Cancel remaining tasks
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+        logger.info("Remote Claude stopped")
+
+
+if __name__ == "__main__":
+    config_file = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
+    asyncio.run(main(config_file))

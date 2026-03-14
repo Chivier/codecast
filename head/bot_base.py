@@ -1,0 +1,451 @@
+"""
+Bot Base - abstract base class for Discord and Telegram bots.
+
+Contains all the shared command handling and message forwarding logic.
+Subclasses implement platform-specific send/edit operations.
+"""
+
+import asyncio
+import logging
+import time
+from abc import ABC, abstractmethod
+from typing import Any, Optional
+
+from .config import Config
+from .ssh_manager import SSHManager
+from .session_router import SessionRouter
+from .daemon_client import DaemonClient, DaemonError, DaemonConnectionError
+from .message_formatter import (
+    split_message,
+    format_tool_use,
+    format_machine_list,
+    format_session_list,
+    format_error,
+    format_status,
+)
+
+logger = logging.getLogger(__name__)
+
+# How often to update the "streaming" message (seconds)
+STREAM_UPDATE_INTERVAL = 1.5
+# Maximum buffer before forcing a message send
+STREAM_BUFFER_FLUSH_SIZE = 1800
+
+
+class BotBase(ABC):
+    """
+    Abstract base class for chat bot implementations.
+
+    Handles command routing, session management, and message forwarding.
+    Subclasses implement platform-specific message sending.
+    """
+
+    def __init__(
+        self,
+        ssh_manager: SSHManager,
+        session_router: SessionRouter,
+        daemon_client: DaemonClient,
+        config: Config,
+    ):
+        self.ssh = ssh_manager
+        self.router = session_router
+        self.daemon = daemon_client
+        self.config = config
+        # Track which channels are currently streaming (to prevent concurrent sends)
+        self._streaming: set[str] = set()
+
+    @abstractmethod
+    async def send_message(self, channel_id: str, text: str) -> Any:
+        """Send a new message to the channel. Returns platform message object."""
+        ...
+
+    @abstractmethod
+    async def edit_message(self, channel_id: str, message_obj: Any, text: str) -> None:
+        """Edit an existing message."""
+        ...
+
+    @abstractmethod
+    async def start(self) -> None:
+        """Start the bot (connect to platform, begin listening)."""
+        ...
+
+    @abstractmethod
+    async def stop(self) -> None:
+        """Stop the bot."""
+        ...
+
+    # ─── Command Dispatcher ───
+
+    async def handle_input(self, channel_id: str, text: str) -> None:
+        """
+        Main entry point: handle a user message from a chat channel.
+        Routes to commands or forwards to Claude session.
+        """
+        text = text.strip()
+        if not text:
+            return
+
+        # Check if it's a command
+        if text.startswith("/"):
+            await self._handle_command(channel_id, text)
+        else:
+            # Forward to active Claude session
+            await self._forward_message(channel_id, text)
+
+    async def _handle_command(self, channel_id: str, text: str) -> None:
+        """Parse and dispatch a command."""
+        parts = text.split(maxsplit=2)
+        cmd = parts[0].lower()
+        args = parts[1:] if len(parts) > 1 else []
+
+        try:
+            if cmd == "/start":
+                await self.cmd_start(channel_id, args)
+            elif cmd == "/resume":
+                await self.cmd_resume(channel_id, args)
+            elif cmd in ("/ls", "/list"):
+                await self.cmd_ls(channel_id, args)
+            elif cmd == "/exit":
+                await self.cmd_exit(channel_id)
+            elif cmd in ("/rm", "/remove", "/destroy"):
+                await self.cmd_rm(channel_id, args)
+            elif cmd == "/mode":
+                await self.cmd_mode(channel_id, args)
+            elif cmd == "/status":
+                await self.cmd_status(channel_id)
+            elif cmd == "/help":
+                await self.cmd_help(channel_id)
+            else:
+                await self.send_message(channel_id, f"Unknown command: `{cmd}`. Use `/help` for available commands.")
+        except DaemonConnectionError as e:
+            await self.send_message(channel_id, format_error(f"Cannot connect to daemon: {e}"))
+        except DaemonError as e:
+            await self.send_message(channel_id, format_error(f"Daemon error: {e}"))
+        except Exception as e:
+            logger.exception(f"Error handling command: {text}")
+            await self.send_message(channel_id, format_error(str(e)))
+
+    # ─── Commands ───
+
+    async def cmd_start(self, channel_id: str, args: list[str]) -> None:
+        """/start <machine> <path> - Create a new session."""
+        if len(args) < 2:
+            await self.send_message(
+                channel_id,
+                "Usage: `/start <machine_id> <path>`\nExample: `/start gpu-1 /home/user/project`"
+            )
+            return
+
+        machine_id = args[0]
+        path = args[1]
+
+        await self.send_message(channel_id, f"Starting session on **{machine_id}**:`{path}`...")
+
+        # Ensure SSH tunnel
+        local_port = await self.ssh.ensure_tunnel(machine_id)
+
+        # Sync skills
+        await self.ssh.sync_skills(machine_id, path)
+
+        # Create session on daemon
+        daemon_session_id = await self.daemon.create_session(
+            local_port, path, self.config.default_mode
+        )
+
+        # Register in session router
+        self.router.register(
+            channel_id, machine_id, path, daemon_session_id, self.config.default_mode
+        )
+
+        await self.send_message(
+            channel_id,
+            f"Session started on **{machine_id}**:`{path}`\n"
+            f"Session ID: `{daemon_session_id[:12]}...`\n"
+            f"Mode: **{self.config.default_mode}**\n\n"
+            f"Send messages to interact with Claude."
+        )
+
+    async def cmd_resume(self, channel_id: str, args: list[str]) -> None:
+        """/resume <session_id> - Resume a previous session."""
+        if len(args) < 1:
+            await self.send_message(channel_id, "Usage: `/resume <session_id>`")
+            return
+
+        session_id = args[0]
+
+        # Find the session in our records
+        session = self.router.find_session_by_daemon_id(session_id)
+        if not session:
+            await self.send_message(channel_id, f"Session `{session_id}` not found in records.")
+            return
+
+        await self.send_message(channel_id, f"Resuming session on **{session.machine_id}**:`{session.path}`...")
+
+        # Ensure tunnel
+        local_port = await self.ssh.ensure_tunnel(session.machine_id)
+
+        # Resume on daemon
+        result = await self.daemon.resume_session(
+            local_port, session_id, session.sdk_session_id
+        )
+
+        if not result.get("ok"):
+            await self.send_message(channel_id, format_error("Failed to resume session"))
+            return
+
+        # Re-register as active
+        self.router.register(
+            channel_id, session.machine_id, session.path, session_id, session.mode
+        )
+
+        fallback_msg = " (fresh session with history injected)" if result.get("fallback") else ""
+        await self.send_message(
+            channel_id,
+            f"Session resumed{fallback_msg} on **{session.machine_id}**:`{session.path}`"
+        )
+
+    async def cmd_ls(self, channel_id: str, args: list[str]) -> None:
+        """/ls machine | /ls session [machine]"""
+        if not args:
+            await self.send_message(
+                channel_id,
+                "Usage:\n"
+                "`/ls machine` - List all machines\n"
+                "`/ls session [machine]` - List sessions"
+            )
+            return
+
+        subcmd = args[0].lower()
+
+        if subcmd in ("machine", "machines"):
+            machines = await self.ssh.list_machines()
+            await self.send_message(channel_id, format_machine_list(machines))
+
+        elif subcmd in ("session", "sessions"):
+            machine_filter = args[1] if len(args) > 1 else None
+            sessions = self.router.list_sessions(machine_filter)
+            await self.send_message(channel_id, format_session_list(sessions))
+
+        else:
+            await self.send_message(channel_id, "Usage: `/ls machine` or `/ls session [machine]`")
+
+    async def cmd_exit(self, channel_id: str) -> None:
+        """/exit - Detach from current session (doesn't destroy it)."""
+        session = self.router.resolve(channel_id)
+        if not session:
+            await self.send_message(channel_id, "No active session to exit.")
+            return
+
+        self.router.detach(channel_id)
+        await self.send_message(
+            channel_id,
+            f"Detached from session on **{session.machine_id}**:`{session.path}`\n"
+            f"Use `/resume {session.daemon_session_id}` to reconnect."
+        )
+
+    async def cmd_rm(self, channel_id: str, args: list[str]) -> None:
+        """/rm <machine> <path> - Destroy a session."""
+        if len(args) < 2:
+            await self.send_message(channel_id, "Usage: `/rm <machine_id> <path>`")
+            return
+
+        machine_id = args[0]
+        path = args[1]
+
+        # Find matching sessions
+        sessions = self.router.find_sessions_by_machine_path(machine_id, path)
+        if not sessions:
+            await self.send_message(channel_id, f"No sessions found for **{machine_id}**:`{path}`")
+            return
+
+        for session in sessions:
+            if session.status in ("active", "detached"):
+                try:
+                    local_port = await self.ssh.ensure_tunnel(machine_id)
+                    await self.daemon.destroy_session(local_port, session.daemon_session_id)
+                except Exception as e:
+                    logger.warning(f"Failed to destroy daemon session: {e}")
+                self.router.destroy(session.channel_id)
+
+        await self.send_message(
+            channel_id,
+            f"Destroyed {len(sessions)} session(s) on **{machine_id}**:`{path}`"
+        )
+
+    async def cmd_mode(self, channel_id: str, args: list[str]) -> None:
+        """/mode <auto|code|plan|ask> - Switch permission mode."""
+        if not args:
+            await self.send_message(
+                channel_id,
+                "Usage: `/mode <auto|code|plan|ask>`\n"
+                "  **auto** - Full auto (bypassPermissions)\n"
+                "  **code** - Auto accept edits, confirm bash\n"
+                "  **plan** - Read-only analysis\n"
+                "  **ask** - Confirm everything"
+            )
+            return
+
+        mode = args[0].lower()
+        if mode not in ("auto", "code", "plan", "ask"):
+            await self.send_message(channel_id, "Invalid mode. Use: `auto`, `code`, `plan`, or `ask`")
+            return
+
+        session = self.router.resolve(channel_id)
+        if not session:
+            await self.send_message(channel_id, "No active session. Use `/start` first.")
+            return
+
+        local_port = await self.ssh.ensure_tunnel(session.machine_id)
+        ok = await self.daemon.set_mode(local_port, session.daemon_session_id, mode)
+
+        if ok:
+            self.router.update_mode(channel_id, mode)
+            await self.send_message(channel_id, f"Mode set to **{mode}**")
+        else:
+            await self.send_message(channel_id, format_error("Failed to set mode"))
+
+    async def cmd_status(self, channel_id: str) -> None:
+        """/status - Show current session status."""
+        session = self.router.resolve(channel_id)
+        if not session:
+            await self.send_message(channel_id, "No active session.")
+            return
+
+        queue_stats = None
+        try:
+            local_port = await self.ssh.ensure_tunnel(session.machine_id)
+            queue_stats = await self.daemon.get_queue_stats(
+                local_port, session.daemon_session_id
+            )
+        except Exception:
+            pass
+
+        await self.send_message(channel_id, format_status(session, queue_stats))
+
+    async def cmd_help(self, channel_id: str) -> None:
+        """/help - Show available commands."""
+        help_text = """**Remote Claude Commands:**
+
+`/start <machine> <path>` - Start a new Claude session
+`/resume <session_id>` - Resume a previous session
+`/ls machine` - List all machines
+`/ls session [machine]` - List sessions
+`/exit` - Detach from current session
+`/rm <machine> <path>` - Destroy a session
+`/mode <auto|code|plan|ask>` - Switch permission mode
+`/status` - Show current session info
+`/help` - Show this help
+
+After `/start` or `/resume`, send any message to interact with Claude."""
+        await self.send_message(channel_id, help_text)
+
+    # ─── Message Forwarding ───
+
+    async def _forward_message(self, channel_id: str, text: str) -> None:
+        """Forward a user message to the active Claude session and stream response."""
+        session = self.router.resolve(channel_id)
+        if not session:
+            await self.send_message(
+                channel_id,
+                "No active session. Use `/start <machine> <path>` to begin."
+            )
+            return
+
+        # Prevent concurrent streaming to the same channel
+        if channel_id in self._streaming:
+            await self.send_message(channel_id, "Claude is still processing. Please wait...")
+            return
+
+        self._streaming.add(channel_id)
+
+        try:
+            local_port = await self.ssh.ensure_tunnel(session.machine_id)
+
+            # Start streaming response
+            buffer = ""
+            current_msg: Any = None
+            last_update = time.time()
+            tool_msgs: list[str] = []
+
+            async for event in self.daemon.send_message(
+                local_port, session.daemon_session_id, text
+            ):
+                event_type = event.get("type", "")
+
+                if event_type == "partial":
+                    # Streaming text delta
+                    content = event.get("content", "")
+                    if content:
+                        buffer += content
+                        now = time.time()
+
+                        # Update message periodically
+                        if now - last_update >= STREAM_UPDATE_INTERVAL:
+                            if current_msg is None:
+                                current_msg = await self.send_message(channel_id, buffer + " ▌")
+                            else:
+                                # Check if buffer exceeds limit
+                                if len(buffer) > STREAM_BUFFER_FLUSH_SIZE:
+                                    # Finalize current message, start new one
+                                    await self.edit_message(channel_id, current_msg, buffer)
+                                    buffer = ""
+                                    current_msg = None
+                                else:
+                                    await self.edit_message(channel_id, current_msg, buffer + " ▌")
+                            last_update = now
+
+                elif event_type == "text":
+                    # Complete text block
+                    content = event.get("content", "")
+                    if content:
+                        # If we were streaming partials, this replaces them
+                        if current_msg:
+                            await self.edit_message(channel_id, current_msg, content)
+                            current_msg = None
+                            buffer = ""
+                        else:
+                            # Send as new message(s)
+                            chunks = split_message(content)
+                            for chunk in chunks:
+                                await self.send_message(channel_id, chunk)
+
+                elif event_type == "tool_use":
+                    # Tool invocation
+                    tool_text = format_tool_use(event)
+                    tool_msgs.append(tool_text)
+                    await self.send_message(channel_id, tool_text)
+
+                elif event_type == "result":
+                    # Claude finished
+                    sdk_session_id = event.get("session_id")
+                    if sdk_session_id:
+                        self.router.update_sdk_session(channel_id, sdk_session_id)
+
+                elif event_type == "queued":
+                    position = event.get("position", "?")
+                    await self.send_message(
+                        channel_id,
+                        f"Message queued (position: {position}). Claude is busy with a previous request."
+                    )
+                    return
+
+                elif event_type == "error":
+                    error_msg = event.get("message", "Unknown error")
+                    await self.send_message(channel_id, format_error(error_msg))
+
+            # Flush remaining buffer
+            if buffer:
+                if current_msg:
+                    await self.edit_message(channel_id, current_msg, buffer)
+                else:
+                    chunks = split_message(buffer)
+                    for chunk in chunks:
+                        await self.send_message(channel_id, chunk)
+
+        except DaemonConnectionError as e:
+            await self.send_message(channel_id, format_error(f"Lost connection to daemon: {e}"))
+        except Exception as e:
+            logger.exception(f"Error forwarding message to Claude")
+            await self.send_message(channel_id, format_error(f"Unexpected error: {e}"))
+        finally:
+            self._streaming.discard(channel_id)

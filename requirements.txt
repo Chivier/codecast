@@ -1,0 +1,17 @@
+# Remote Claude - Head Node Dependencies
+
+# Config
+pyyaml>=6.0
+
+# SSH
+asyncssh>=2.14.0
+
+# HTTP client (for daemon RPC)
+aiohttp>=3.9.0
+
+# Discord bot
+discord.py>=2.3.0
+
+# Telegram bot
+python-telegram-bot>=20.0
+

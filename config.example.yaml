@@ -1,0 +1,51 @@
+# Remote Claude Configuration
+# Copy this file to config.yaml and edit as needed.
+
+machines:
+  # Example: a GPU server accessible via SSH
+  gpu-1:
+    host: gpu1.example.com      # hostname or IP
+    user: your-ssh-user         # SSH username
+    # ssh_key: ~/.ssh/id_rsa    # Optional: path to SSH key (defaults to ssh-agent)
+    # port: 22                  # SSH port (default: 22)
+    # proxy_jump: gateway       # Optional: jump host (must also be defined as a machine)
+    daemon_port: 9100           # Port for daemon RPC (default: 9100)
+    # node_path: /usr/bin/node  # Optional: path to node on remote
+    default_paths:              # Commonly used project paths (for reference)
+      - /home/your-user/project-a
+      - /home/your-user/project-b
+
+  # Example: another server behind a jump host
+  # gpu-2:
+  #   host: gpu2.lab.internal
+  #   user: your-ssh-user
+  #   proxy_jump: gpu-1
+  #   daemon_port: 9100
+
+bot:
+  discord:
+    token: ${DISCORD_TOKEN}     # Set via environment variable
+    allowed_channels:           # Only respond in these channels (empty = all)
+      # - 123456789012345678
+    command_prefix: "/"
+
+  telegram:
+    token: ${TELEGRAM_TOKEN}    # Set via environment variable
+    allowed_users:              # Only respond to these user IDs (empty = all)
+      # - 123456789
+
+# Default permission mode for new sessions
+# auto = bypassPermissions (full auto, no confirmation needed)
+# code = acceptEdits (auto accept file edits, confirm bash)
+# plan = read-only analysis
+# ask  = confirm everything
+default_mode: auto
+
+skills:
+  shared_dir: ./skills          # Local skills directory to sync to remotes
+  sync_on_start: true           # Sync skills when /start creates a session
+
+daemon:
+  install_dir: ~/.remote-claude/daemon  # Where daemon code lives on remote
+  auto_deploy: true                     # Auto-deploy daemon code to remotes
+  log_file: ~/.remote-claude/daemon.log # Daemon log file on remote
