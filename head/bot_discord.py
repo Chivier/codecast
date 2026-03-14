@@ -22,6 +22,7 @@ from .session_router import SessionRouter
 from .daemon_client import DaemonClient, DaemonError, DaemonConnectionError
 from .bot_base import BotBase
 from .message_formatter import split_message, format_error, display_mode
+from .file_pool import FilePool, FileEntry
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,11 @@ class DiscordBot(BotBase):
         session_router: SessionRouter,
         daemon_client: DaemonClient,
         config: Config,
+        file_pool: Optional[FilePool] = None,
     ):
         super().__init__(ssh_manager, session_router, daemon_client, config)
         self.discord_config: Optional[DiscordConfig] = config.bot.discord
+        self.file_pool = file_pool
 
         if not self.discord_config:
             raise ValueError("Discord config not found in config.yaml")
@@ -108,8 +111,39 @@ class DiscordBot(BotBase):
             channel_id = f"discord:{message.channel.id}"
             self._channels[channel_id] = message.channel
 
+            # Process attachments
+            file_refs: list[FileEntry] = []
+            if message.attachments and self.file_pool:
+                session = self.router.resolve(channel_id)
+                session_prefix = session.daemon_session_id[:8] if session else "nosess"
+
+                for att in message.attachments:
+                    if not self.file_pool.is_allowed_type(att.filename, att.content_type):
+                        await message.channel.send(
+                            f"Skipping unsupported file: `{att.filename}` ({att.content_type})"
+                        )
+                        continue
+                    try:
+                        entry = await self.file_pool.download_discord_attachment(
+                            att, session_prefix=session_prefix
+                        )
+                        file_refs.append(entry)
+                    except Exception as e:
+                        logger.warning(f"Failed to download attachment {att.filename}: {e}")
+                        await message.channel.send(f"Failed to download `{att.filename}`: {e}")
+
+            # Build message with file markers
+            text = message.content or ""
+            if file_refs:
+                for ref in file_refs:
+                    text += f"\n<discord_file>{ref.file_id}</discord_file>"
+
+            # Skip if no content and no attachments
+            if not text.strip() and not file_refs:
+                return
+
             # Forward non-command messages to Claude session
-            await self._forward_message_with_heartbeat(channel_id, message.content)
+            await self._forward_message_with_heartbeat(channel_id, text, file_refs=file_refs)
 
     def _defer_and_register(self, interaction: discord.Interaction) -> str:
         """Register a deferred interaction and return channel_id."""
@@ -441,8 +475,8 @@ class DiscordBot(BotBase):
 
     # --- Message Forwarding with Heartbeat ---
 
-    async def _forward_message_with_heartbeat(self, channel_id: str, text: str) -> None:
-        """Forward a user message to Claude with typing indicator and heartbeat."""
+    async def _forward_message_with_heartbeat(self, channel_id: str, text: str, file_refs: list | None = None) -> None:
+        """Forward a user message to Claude with typing indicator, heartbeat, and file upload."""
         session = self.router.resolve(channel_id)
         if not session:
             await self.send_message(
@@ -474,6 +508,18 @@ class DiscordBot(BotBase):
 
         try:
             local_port = await self.ssh.ensure_tunnel(session.machine_id)
+
+            # Upload files and replace markers before sending to Claude
+            if file_refs:
+                try:
+                    text = await self._upload_and_replace_files(
+                        session.machine_id, text, file_refs
+                    )
+                except Exception as e:
+                    await self.send_message(
+                        channel_id, format_error(f"File upload failed: {e}")
+                    )
+                    return
 
             buffer = ""
             current_msg: Any = None
