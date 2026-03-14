@@ -17,6 +17,7 @@ from head.session_router import SessionRouter
 from head.daemon_client import DaemonClient
 from head.bot_discord import DiscordBot
 from head.bot_telegram import TelegramBot
+from head.file_pool import FilePool
 
 # Configure logging
 logging.basicConfig(
@@ -51,6 +52,13 @@ async def main(config_path: str = "config.yaml") -> None:
     )
     daemon_client = DaemonClient()
 
+    # Initialize file pool for Discord attachments
+    file_pool = FilePool(
+        max_size=config.file_pool.max_size,
+        pool_dir=Path(config.file_pool.pool_dir).expanduser(),
+        allowed_types=config.file_pool.allowed_types,
+    )
+
     # Track bots for cleanup
     bots: list[DiscordBot | TelegramBot] = []
     tasks: list[asyncio.Task[None]] = []
@@ -59,7 +67,7 @@ async def main(config_path: str = "config.yaml") -> None:
     discord_bot: Optional[DiscordBot] = None
     if config.bot.discord and config.bot.discord.token:
         try:
-            discord_bot = DiscordBot(ssh_manager, session_router, daemon_client, config)
+            discord_bot = DiscordBot(ssh_manager, session_router, daemon_client, config, file_pool=file_pool)
             bots.append(discord_bot)
             logger.info("Discord bot configured")
         except Exception as e:

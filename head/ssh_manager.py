@@ -389,6 +389,46 @@ class SSHManager:
             return tunnel.local_port
         return None
 
+    async def upload_files(
+        self,
+        machine_id: str,
+        file_entries: list,
+        remote_base: Optional[str] = None,
+    ) -> dict[str, str]:
+        """
+        SCP files to the remote machine.
+
+        Args:
+            machine_id: Target machine ID.
+            file_entries: List of FileEntry objects to upload.
+            remote_base: Remote directory (defaults to config.file_pool.remote_dir).
+
+        Returns:
+            Dict mapping file_id -> remote_path.
+        """
+        if not remote_base:
+            remote_base = self.config.file_pool.remote_dir
+
+        # Get SSH connection (reuse tunnel connection)
+        if machine_id not in self.tunnels or not self.tunnels[machine_id].alive:
+            raise ValueError(f"No active tunnel to {machine_id}")
+        conn = self.tunnels[machine_id].conn
+
+        # Ensure remote directory exists
+        await conn.run(f"mkdir -p {remote_base}")
+
+        mapping: dict[str, str] = {}
+        for entry in file_entries:
+            remote_filename = f"{entry.file_id}_{entry.original_name}"
+            remote_path = f"{remote_base}/{remote_filename}"
+            await asyncssh.scp(str(entry.local_path), (conn, remote_path))
+            mapping[entry.file_id] = remote_path
+            logger.info(
+                f"Uploaded {entry.original_name} to {machine_id}:{remote_path}"
+            )
+
+        return mapping
+
     async def close_all(self) -> None:
         """Close all SSH tunnels and connections."""
         for machine_id, tunnel in list(self.tunnels.items()):

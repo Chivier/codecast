@@ -58,6 +58,24 @@ class DaemonDeployConfig:
     log_file: str = "~/.remote-claude/daemon.log"
 
 
+DEFAULT_ALLOWED_FILE_TYPES = [
+    "text/plain",
+    "text/markdown",
+    "application/pdf",
+    "image/*",
+    "video/*",
+    "audio/*",
+]
+
+
+@dataclass
+class FilePoolConfig:
+    max_size: int = 1073741824  # 1GB in bytes
+    pool_dir: str = "~/.remote-claude/file-pool"
+    remote_dir: str = "/tmp/remote-claude/files"
+    allowed_types: list[str] = field(default_factory=lambda: list(DEFAULT_ALLOWED_FILE_TYPES))
+
+
 @dataclass
 class Config:
     machines: dict[str, MachineConfig] = field(default_factory=dict)
@@ -65,6 +83,7 @@ class Config:
     default_mode: str = "auto"
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     daemon: DaemonDeployConfig = field(default_factory=DaemonDeployConfig)
+    file_pool: FilePoolConfig = field(default_factory=FilePoolConfig)
 
 
 def expand_env_vars(value: str) -> str:
@@ -160,6 +179,15 @@ def load_config(config_path: str = "config.yaml") -> Config:
             install_dir=daemon_raw.get("install_dir", "~/.remote-claude/daemon"),
             auto_deploy=daemon_raw.get("auto_deploy", True),
             log_file=daemon_raw.get("log_file", "~/.remote-claude/daemon.log"),
+        )
+
+    file_pool_raw: dict[str, Any] = raw.get("file_pool", {})
+    if file_pool_raw:
+        config.file_pool = FilePoolConfig(
+            max_size=file_pool_raw.get("max_size", 1073741824),
+            pool_dir=expand_env_vars(file_pool_raw.get("pool_dir", "~/.remote-claude/file-pool")),
+            remote_dir=file_pool_raw.get("remote_dir", "/tmp/remote-claude/files"),
+            allowed_types=file_pool_raw.get("allowed_types", list(DEFAULT_ALLOWED_FILE_TYPES)),
         )
 
     return config

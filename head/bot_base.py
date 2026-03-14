@@ -483,7 +483,31 @@ After `/start` or `/resume`, send any message to interact with Claude."""
 
     # ─── Message Forwarding ───
 
-    async def _forward_message(self, channel_id: str, text: str) -> None:
+    async def _upload_and_replace_files(
+        self,
+        machine_id: str,
+        text: str,
+        file_refs: list | None = None,
+    ) -> str:
+        """
+        Upload file_refs to the remote machine via SCP and replace
+        <discord_file>file_id</discord_file> markers with actual remote paths.
+
+        Returns the text with all markers replaced.
+        Raises on upload failure (caller should handle).
+        """
+        if not file_refs:
+            return text
+
+        path_mapping = await self.ssh.upload_files(machine_id, file_refs)
+        for file_id, remote_path in path_mapping.items():
+            text = text.replace(
+                f"<discord_file>{file_id}</discord_file>",
+                remote_path,
+            )
+        return text
+
+    async def _forward_message(self, channel_id: str, text: str, file_refs: list | None = None) -> None:
         """Forward a user message to the active Claude session and stream response."""
         session = self.router.resolve(channel_id)
         if not session:
@@ -502,6 +526,18 @@ After `/start` or `/resume`, send any message to interact with Claude."""
 
         try:
             local_port = await self.ssh.ensure_tunnel(session.machine_id)
+
+            # Upload files and replace markers before sending to Claude
+            if file_refs:
+                try:
+                    text = await self._upload_and_replace_files(
+                        session.machine_id, text, file_refs
+                    )
+                except Exception as e:
+                    await self.send_message(
+                        channel_id, format_error(f"File upload failed: {e}")
+                    )
+                    return
 
             # Start streaming response
             buffer = ""
