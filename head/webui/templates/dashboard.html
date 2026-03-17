@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+<div hx-get="/api/status" hx-trigger="load, every 5s" hx-swap="innerHTML" id="status-area">
+    <p class="muted">Loading status...</p>
+</div>
+
+<h2>Quick Info</h2>
+<div class="info-section">
+    <p><strong>Peers configured:</strong> {{ peer_count }}</p>
+    <p><strong>Active sessions:</strong> {{ session_count }}</p>
+</div>
+{% endblock %}

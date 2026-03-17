@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Sessions</h1>
+
+{% if sessions %}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Peer</th>
+            <th>Path</th>
+            <th>Status</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in sessions %}
+        <tr>
+            <td>{{ s.id[:8] }}...</td>
+            <td>{{ s.name or '-' }}</td>
+            <td>{{ s.peer or '-' }}</td>
+            <td><code>{{ s.path or '-' }}</code></td>
+            <td><span class="badge {{ s.status or 'unknown' }}">{{ s.status or 'unknown' }}</span></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+    <p>No active sessions. Use <code>/start</code> to create one.</p>
+</div>
+{% endif %}
+{% endblock %}

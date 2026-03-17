@@ -17,6 +17,7 @@ Provides subcommand dispatch via argparse:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import signal
@@ -298,8 +299,42 @@ def _cmd_bot(args: argparse.Namespace) -> None:
 
 
 def _cmd_webui(args: argparse.Namespace) -> None:
-    """Start the web UI (placeholder)."""
-    print("Web UI is not yet implemented.")
+    """Start the web UI."""
+    # Load config (optional -- webui works without it)
+    config = None
+    try:
+        from head.config_v2 import load_config_v2
+        cfg_path = args.config or str(Path.home() / ".codecast" / "config.yaml")
+        config = load_config_v2(cfg_path)
+    except Exception:
+        pass
+
+    # Determine bind/port from config or defaults
+    port = 31949
+    bind = "127.0.0.1"
+    if config and config.bot and config.bot.webui:
+        port = config.bot.webui.port or port
+        bind = config.bot.webui.host or bind
+
+    print(f"Starting WebUI on http://{bind}:{port}")
+    asyncio.run(_start_webui(config, bind, port))
+
+
+async def _start_webui(config, bind: str, port: int) -> None:
+    """Run the WebUI server until interrupted."""
+    from head.webui.server import create_app
+    from aiohttp import web
+
+    app = await create_app(config, bind=bind)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, bind, port)
+    await site.start()
+    print(f"WebUI running at http://{bind}:{port}")
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Settings</h1>
+
+<section class="settings-section">
+    <h2>Configuration</h2>
+    {% if config %}
+    <table class="data-table">
+        <tbody>
+            <tr><td>Default Mode</td><td><code>{{ config.default_mode }}</code></td></tr>
+            <tr><td>Tool Batch Size</td><td><code>{{ config.tool_batch_size }}</code></td></tr>
+            <tr><td>Skills Directory</td><td><code>{{ config.skills.shared_dir }}</code></td></tr>
+            <tr><td>Auto Deploy</td><td><code>{{ config.daemon.auto_deploy }}</code></td></tr>
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No config loaded.</p>
+    {% endif %}
+</section>
+
+<section class="settings-section">
+    <h2>Security</h2>
+    <p>Auth required: <strong>{{ "Yes" if auth_required else "No (localhost only)" }}</strong></p>
+</section>
+{% endblock %}

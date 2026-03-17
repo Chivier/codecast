@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Peers</h1>
+
+<div hx-get="/api/peers" hx-trigger="load, every 10s" hx-swap="innerHTML" id="peers-area">
+    <p class="muted">Loading peers...</p>
+</div>
+
+{% if not peers %}
+<div class="empty-state">
+    <p>No peers configured. Add peers in your <code>config.yaml</code> file.</p>
+</div>
+{% endif %}
+{% endblock %}
