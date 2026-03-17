@@ -405,6 +405,20 @@ class TestFindSessionByNameOrId:
         assert found.status == "detached"
 
 
+class TestPeerColumnCompatibility:
+    def test_peer_column_compatibility(self, router):
+        """Session router machine_id field works (will become peer in v2)."""
+        name = router.register(
+            channel_id="discord:123",
+            machine_id="gpu-1",
+            path="/home/user/project",
+            daemon_session_id="uuid-1",
+        )
+        session = router.resolve("discord:123")
+        assert session is not None
+        assert session.machine_id == "gpu-1"
+
+
 class TestSchemaMigration:
     def test_existing_db_without_name_column(self, tmp_path):
         """Test that old databases without 'name' column get migrated."""
