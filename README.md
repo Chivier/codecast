@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo.png" alt="Codecast" width="200">
+  <img src="docs/images/logo.png" alt="Codecast" width="200">
 </p>
 
 <h1 align="center">Codecast</h1>
