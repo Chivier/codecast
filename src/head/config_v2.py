@@ -196,8 +196,14 @@ def load_config_v2(config_path: str) -> ConfigV2:
 
     cfg = ConfigV2()
 
-    # Parse peers
+    # Parse peers (v2 format) or machines (v1 format, auto-migrate)
     peers_raw: dict[str, Any] = raw.get("peers", {})
+    if not peers_raw:
+        # Fall back to v1 "machines" key and auto-migrate
+        machines_raw: dict[str, Any] = raw.get("machines", {})
+        if machines_raw:
+            logger.info("Auto-migrating v1 'machines' config to v2 'peers' format")
+            return migrate_v1_to_v2(config_path)
     if peers_raw:
         for peer_id, peer_data in peers_raw.items():
             cfg.peers[peer_id] = _parse_peer(peer_id, peer_data or {})
