@@ -31,6 +31,8 @@ from .message_formatter import (
     split_message,
     format_tool_use,
     compress_tool_messages,
+    format_activity_message,
+    format_tool_line,
     format_machine_list,
     format_session_list,
     format_error,
@@ -276,11 +278,11 @@ class BotEngine:
             channel_id,
             f"\u2705 **Session ready**\n"
             f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-            f"\ud83d\udcbb **Peer:** {machine_id}\n"
-            f"\ud83d\udcc2 **Path:** `{path}`\n"
-            f"\ud83c\udff7\ufe0f **Name:** {name}\n"
-            f"\ud83d\udd10 **Mode:** {display_mode(self.config.default_mode)}\n"
-            f"\ud83c\udd94 `{daemon_session_id}`\n"
+            f"💻 **Peer:** {machine_id}\n"
+            f"📂 **Path:** `{path}`\n"
+            f"🏷\ufe0f **Name:** {name}\n"
+            f"🔐 **Mode:** {display_mode(self.config.default_mode)}\n"
+            f"🆔 `{daemon_session_id}`\n"
             f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
             f"\u2328\ufe0f Send a message to start chatting with Claude.",
         )
@@ -304,7 +306,7 @@ class BotEngine:
 
         await self.send_message(
             channel_id,
-            f"\ud83d\udd04 Resuming session{name_str} on **{session.machine_id}**:`{session.path}`...",
+            f"🔄 Resuming session{name_str} on **{session.machine_id}**:`{session.path}`...",
         )
 
         # Ensure tunnel
@@ -360,7 +362,7 @@ class BotEngine:
         name_hint = session.name or session.daemon_session_id
         await self.send_message(
             channel_id,
-            f"\ud83d\udc4b Detached from session on **{session.machine_id}**:`{session.path}`\n"
+            f"👋 Detached from session on **{session.machine_id}**:`{session.path}`\n"
             f"Use `/resume {name_hint}` to reconnect.",
         )
 
@@ -393,7 +395,7 @@ class BotEngine:
 
         await self.send_message(
             channel_id,
-            f"\ud83d\uddd1\ufe0f Destroyed {len(sessions)} session(s) on **{machine_id}**:`{path}`",
+            f"🗑\ufe0f Destroyed {len(sessions)} session(s) on **{machine_id}**:`{path}`",
         )
 
     async def cmd_mode(self, channel_id: str, args: list[str]) -> None:
@@ -430,7 +432,7 @@ class BotEngine:
 
         if ok:
             self.router.update_mode(channel_id, mode)
-            await self.send_message(channel_id, f"\ud83d\udd10 Mode set to **{display_mode(mode)}**")
+            await self.send_message(channel_id, f"🔐 Mode set to **{display_mode(mode)}**")
         else:
             await self.send_message(channel_id, format_error("Failed to set mode"))
 
@@ -466,7 +468,7 @@ class BotEngine:
             else:
                 await self.send_message(
                     channel_id,
-                    "\ud83d\udca4 Claude is not currently processing any request.",
+                    "💤 Claude is not currently processing any request.",
                 )
         except Exception as e:
             await self.send_message(channel_id, format_error(f"Failed to interrupt: {e}"))
@@ -482,7 +484,7 @@ class BotEngine:
         path = session.path
         old_name = session.name or session.daemon_session_id
 
-        await self.send_message(channel_id, f"\ud83e\uddf9 Clearing session **{old_name}** and starting fresh...")
+        await self.send_message(channel_id, f"🧹 Clearing session **{old_name}** and starting fresh...")
 
         # Destroy old session
         try:
@@ -1222,7 +1224,13 @@ After `/start` or `/resume`, send any message to interact with Claude."""
         text: str,
         file_refs: list | None = None,
     ) -> None:
-        """Forward a user message to the active Claude session and stream response."""
+        """
+        Forward a user message to the active Claude session and stream response.
+
+        Uses a 2-message model:
+        - Message 1 (activity): Accumulates tool calls + thinking, edited in-place
+        - Message 2+ (result): Final text output, sent as new message(s)
+        """
         session = self.router.resolve(channel_id)
         if not session:
             await self.send_message(
@@ -1256,71 +1264,71 @@ After `/start` or `/resume`, send any message to interact with Claude."""
                     await self.send_message(channel_id, format_error(f"File upload failed: {e}"))
                     return
 
-            # Start streaming response
-            buffer = ""
-            current_msg: Optional[MessageHandle] = None
-            last_update = time.time()
-            tool_msgs: list[str] = []
-            tool_batch: list[dict] = []
-            tool_batch_size = self.config.tool_batch_size
+            # Activity message state (tools + thinking)
+            activity_msg: Optional[MessageHandle] = None
+            activity_lines: list[str] = []  # Tool call summary lines
+            thinking_buf: str = ""  # Accumulated partial text for thinking display
+            last_activity_update = time.time()
+
+            async def update_activity():
+                """Edit or create the activity message with current tool lines + thinking."""
+                nonlocal activity_msg, activity_lines, last_activity_update
+                content = format_activity_message(activity_lines, thinking_buf, cursor=True)
+                if not content.strip():
+                    return
+                # If content exceeds Discord limit, finalize current and start new
+                if len(content) > 1900 and activity_msg is not None:
+                    await finalize_activity()
+                    content = format_activity_message(activity_lines, thinking_buf, cursor=True)
+                if activity_msg is None:
+                    activity_msg = await self.send_message(channel_id, content)
+                else:
+                    await self.edit_message(activity_msg, content)
+                last_activity_update = time.time()
+
+            async def finalize_activity():
+                """Remove cursor/thinking from activity message, freeze it."""
+                nonlocal activity_msg, activity_lines
+                if activity_msg is not None and activity_lines:
+                    final = format_activity_message(activity_lines, "", cursor=False)
+                    await self.edit_message(activity_msg, final)
+                activity_msg = None
+                activity_lines = []
 
             async for event in self.daemon.send_message(local_port, session.daemon_session_id, text):
                 event_type = event.get("type", "")
 
-                # Ignore keepalive pings from daemon
                 if event_type == "ping":
                     continue
 
-                # Flush tool batch before any non-tool event
-                if event_type != "tool_use" and tool_batch:
-                    batch_text = compress_tool_messages(tool_batch)
-                    tool_msgs.append(batch_text)
-                    await self.send_message(channel_id, batch_text)
-                    tool_batch = []
+                if event_type == "tool_use":
+                    activity_lines.append(format_tool_line(event))
+                    thinking_buf = ""  # Reset thinking when a new tool starts
+                    await update_activity()
 
-                if event_type == "partial":
+                elif event_type == "partial":
                     content = event.get("content", "")
                     if content:
-                        buffer += content
+                        thinking_buf += content
                         now = time.time()
-
-                        if now - last_update >= STREAM_UPDATE_INTERVAL:
-                            if current_msg is None:
-                                current_msg = await self.send_message(channel_id, buffer + " ▌")
-                            else:
-                                if len(buffer) > STREAM_BUFFER_FLUSH_SIZE:
-                                    await self.edit_message(current_msg, buffer)
-                                    buffer = ""
-                                    current_msg = None
-                                else:
-                                    await self.edit_message(current_msg, buffer + " ▌")
-                            last_update = now
+                        if now - last_activity_update >= STREAM_UPDATE_INTERVAL:
+                            await update_activity()
 
                 elif event_type == "text":
                     content = event.get("content", "")
                     if content:
-                        if current_msg:
-                            await self.edit_message(current_msg, content)
-                            current_msg = None
-                            buffer = ""
-                        else:
-                            chunks = split_message(content)
-                            for chunk in chunks:
-                                await self.send_message(channel_id, chunk)
+                        # Finalize activity message before sending result text
+                        thinking_buf = ""
+                        await finalize_activity()
+                        chunks = split_message(content)
+                        for chunk in chunks:
+                            await self.send_message(channel_id, chunk)
 
                         # Detect and forward files from completed text
                         if self.file_forward:
                             await self._detect_and_forward_files(
                                 channel_id, session.machine_id, content
                             )
-
-                elif event_type == "tool_use":
-                    tool_batch.append(event)
-                    if len(tool_batch) >= tool_batch_size:
-                        batch_text = compress_tool_messages(tool_batch)
-                        tool_msgs.append(batch_text)
-                        await self.send_message(channel_id, batch_text)
-                        tool_batch = []
 
                 elif event_type == "result":
                     sdk_session_id = event.get("session_id")
@@ -1353,21 +1361,9 @@ After `/start` or `/resume`, send any message to interact with Claude."""
                     error_msg = event.get("message", "Unknown error")
                     await self.send_message(channel_id, format_error(error_msg))
 
-            # Flush remaining tool batch
-            if tool_batch:
-                batch_text = compress_tool_messages(tool_batch)
-                tool_msgs.append(batch_text)
-                await self.send_message(channel_id, batch_text)
-                tool_batch = []
-
-            # Flush remaining buffer
-            if buffer:
-                if current_msg:
-                    await self.edit_message(current_msg, buffer)
-                else:
-                    chunks = split_message(buffer)
-                    for chunk in chunks:
-                        await self.send_message(channel_id, chunk)
+            # Finalize any remaining activity message
+            thinking_buf = ""
+            await finalize_activity()
 
         except DaemonConnectionError as e:
             await self.send_message(
