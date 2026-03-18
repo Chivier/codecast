@@ -498,7 +498,7 @@ class BotEngine:
         await self.cmd_start(channel_id, [machine_id, path])
 
     async def cmd_new(self, channel_id: str) -> None:
-        """/new - Start a new session in the same machine and directory as the current one."""
+        """/new - Destroy the current session and start a fresh one in the same location (like Claude CLI /new)."""
         session = self.router.resolve(channel_id)
         if not session:
             await self.send_message(
@@ -509,9 +509,17 @@ class BotEngine:
 
         machine_id = session.machine_id
         path = session.path
+        old_name = session.name or session.daemon_session_id
 
-        # Detach from current session (keep it alive)
-        self.router.detach(channel_id)
+        await self.send_message(channel_id, f"🔄 Starting fresh session (replacing **{old_name}**)...")
+
+        # Destroy old session
+        try:
+            local_port = await self.ssh.ensure_tunnel(machine_id)
+            await self.daemon.destroy_session(local_port, session.daemon_session_id)
+        except Exception as e:
+            logger.warning(f"Failed to destroy session during /new: {e}")
+        self.router.destroy(channel_id)
 
         # Start a new session in the same location
         await self.cmd_start(channel_id, [machine_id, path])

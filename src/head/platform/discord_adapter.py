@@ -935,6 +935,17 @@ class DiscordAdapter:
                 except Exception as e:
                     await self.send_message(channel_id, format_error(str(e)))
 
+        # ------------------------------------------------------------------ /new
+        @tree.command(name="new", description="Start a fresh session in the same location (destroy current)")
+        async def slash_new(interaction: discord.Interaction) -> None:
+            await interaction.response.defer()
+            channel_id = self._defer_and_register(interaction)
+            if self._on_input:
+                try:
+                    await self._on_input(channel_id, "/new", interaction.user.id, None)
+                except Exception as e:
+                    await self.send_message(channel_id, format_error(str(e)))
+
         # ------------------------------------------------------------------ /help
         @tree.command(name="help", description="Show available Codecast commands")
         async def slash_help(interaction: discord.Interaction) -> None:
