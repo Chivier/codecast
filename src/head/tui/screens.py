@@ -14,6 +14,8 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
+from .widgets import PeerTable, StatusPanel
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,7 +114,14 @@ class SetupWizardScreen(Screen):
 class DashboardScreen(Screen):
     """Main dashboard shown when a config already exists."""
 
-    BINDINGS = [("q", "quit_app", "Quit")]
+    BINDINGS = [
+        ("d", "toggle_daemon", "Daemon"),
+        ("b", "start_bot", "Bot"),
+        ("w", "start_webui", "WebUI"),
+        ("a", "add_peer", "Add Peer"),
+        ("s", "sessions", "Sessions"),
+        ("q", "quit_app", "Quit"),
+    ]
 
     def __init__(self, config_path: str, version: str = "") -> None:
         super().__init__()
@@ -122,63 +131,41 @@ class DashboardScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header()
 
-        # Gather status
-        daemon_running, daemon_port = _check_daemon_running()
         cfg = _load_config(self.config_path)
         peer_count = len(cfg.peers) if cfg else 0
 
-        discord_status = "not configured"
-        telegram_status = "not configured"
-        if cfg:
-            if cfg.bot.discord and cfg.bot.discord.token:
-                discord_status = "configured"
-            if cfg.bot.telegram and cfg.bot.telegram.token:
-                telegram_status = "configured"
-
-        daemon_label = (
-            f"running (port {daemon_port})" if daemon_running else "not running"
-        )
-
-        status_text = (
-            f"Codecast {self.version}\n\n"
-            f"Local daemon: {daemon_label}\n"
-            f"Peers: {peer_count} configured\n"
-            f"Bots: Discord {discord_status}, Telegram {telegram_status}\n"
-        )
-
-        toggle_label = "Stop local daemon" if daemon_running else "Start local daemon"
-
-        options = [
-            Option("Manage sessions", id="sessions"),
-            Option(toggle_label, id="toggle_daemon"),
-            Option("Add a remote peer", id="add_peer"),
-            Option("Configure bots", id="config_bots"),
-            Option("Settings", id="settings"),
-            Option("Quit", id="quit"),
-        ]
-
         yield Vertical(
-            Static(status_text, id="status"),
-            Static("What would you like to do?", id="dashboard_prompt"),
-            OptionList(*options, id="dashboard_menu"),
+            Vertical(
+                Static(f"[bold]Status[/bold]", id="status_panel_title"),
+                StatusPanel(id="status"),
+                id="status_panel_container",
+            ),
+            Vertical(
+                Static(
+                    f"[bold]Peers ({peer_count} configured)[/bold]",
+                    id="peer_table_title",
+                ),
+                PeerTable(self.config_path, id="peer_table"),
+                id="peer_table_container",
+            ),
             id="dashboard_container",
         )
         yield Footer()
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        option_id = event.option.id
-        if option_id == "quit":
-            self.app.exit()
-        elif option_id == "toggle_daemon":
-            self.app.push_screen(StartDaemonScreen(self.config_path))
-        elif option_id == "add_peer":
-            self.app.push_screen(AddPeerScreen(self.config_path))
-        elif option_id == "config_bots":
-            self.app.push_screen(ConfigBotScreen(self.config_path, "discord"))
-        elif option_id == "sessions":
-            self.app.push_screen(SessionsScreen(self.config_path))
-        elif option_id == "settings":
-            self.notify("Settings not yet implemented.")
+    def action_toggle_daemon(self) -> None:
+        self.app.push_screen(StartDaemonScreen(self.config_path))
+
+    def action_start_bot(self) -> None:
+        self.app.push_screen(ConfigBotScreen(self.config_path, "discord"))
+
+    def action_start_webui(self) -> None:
+        self.notify("WebUI management not yet implemented.")
+
+    def action_add_peer(self) -> None:
+        self.app.push_screen(AddPeerScreen(self.config_path))
+
+    def action_sessions(self) -> None:
+        self.app.push_screen(SessionsScreen(self.config_path))
 
     def action_quit_app(self) -> None:
         self.app.exit()
