@@ -262,8 +262,20 @@ class BotEngine:
         # Sync skills
         await self.ssh.sync_skills(machine_id, path)
 
-        # Create session on daemon
-        daemon_session_id = await self.daemon.create_session(local_port, path, self.config.default_mode)
+        # Create session on daemon (retry once if daemon is unreachable)
+        try:
+            daemon_session_id = await self.daemon.create_session(local_port, path, self.config.default_mode)
+        except (DaemonConnectionError, Exception) as e:
+            if "Server disconnected" in str(e) or "connect" in str(e).lower():
+                logger.info(f"Daemon unreachable on {machine_id}, reconnecting...")
+                # Invalidate cached tunnel so ensure_tunnel restarts the daemon
+                if machine_id in self.ssh.tunnels:
+                    await self.ssh.tunnels[machine_id].close()
+                    del self.ssh.tunnels[machine_id]
+                local_port = await self.ssh.ensure_tunnel(machine_id)
+                daemon_session_id = await self.daemon.create_session(local_port, path, self.config.default_mode)
+            else:
+                raise
 
         # Register in session router
         name = self.router.register(
