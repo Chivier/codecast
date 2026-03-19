@@ -153,13 +153,17 @@ def _read_pid_file(path: Path) -> int | None:
 
 
 def _daemon_healthy(port: int) -> bool:
-    """Quick health check against localhost:<port>."""
+    """Quick health check against localhost:<port> via JSON-RPC."""
+    import json
     import urllib.request
 
     try:
+        payload = json.dumps({"jsonrpc": "2.0", "method": "health.check", "params": {}, "id": "1"}).encode()
         req = urllib.request.Request(
-            f"http://127.0.0.1:{port}/health",
-            method="GET",
+            f"http://127.0.0.1:{port}/rpc",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
         with urllib.request.urlopen(req, timeout=2) as resp:
             return resp.status == 200
