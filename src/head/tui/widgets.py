@@ -69,34 +69,43 @@ class StatusPanel(Static):
         head_running = head_pid is not None and pid_alive(head_pid)
         if head_running:
             bots = self._get_bot_summary()
-            bot_info = f" | bots: {', '.join(bots)}" if bots else ""
-            lines.append(f"Head:   [green]●[/green] running (pid={head_pid}){bot_info}")
+            bot_info = f" | bots: [bold white]{', '.join(bots)}[/bold white]" if bots else ""
+            lines.append(
+                f"[bold]Head:[/bold]   [bold green]● running[/bold green] [dim](pid={head_pid})[/dim]{bot_info}"
+            )
         else:
-            lines.append("Head:   [dim]○[/dim] not running")
+            lines.append("[bold]Head:[/bold]   [bold red]○ stopped[/bold red]")
 
         # Daemon
         port = read_port_file()
         daemon_pid = read_pid_file(DAEMON_PID_FILE) or find_process("codecast-daemon")
         if port is not None and daemon_healthy(port):
-            pid_part = f" (pid={daemon_pid})" if daemon_pid else ""
-            lines.append(f"Daemon: [green]●[/green] running on port {port}{pid_part}")
+            pid_part = f" [dim](pid={daemon_pid})[/dim]" if daemon_pid else ""
+            lines.append(
+                f"[bold]Daemon:[/bold] [bold green]● running[/bold green]"
+                f" on port [bold white]{port}[/bold white]{pid_part}"
+            )
         else:
-            lines.append("Daemon: [dim]○[/dim] not running")
+            lines.append("[bold]Daemon:[/bold] [bold red]○ stopped[/bold red]")
 
         # WebUI
         webui_pid = read_pid_file(WEBUI_PID_FILE)
         webui_port = read_pid_file(WEBUI_PORT_FILE)
         if webui_pid is not None and pid_alive(webui_pid):
-            lines.append(f"WebUI:  [green]●[/green] running on http://127.0.0.1:{webui_port} (pid={webui_pid})")
+            lines.append(
+                f"[bold]WebUI:[/bold]  [bold green]● running[/bold green]"
+                f" on [bold white]http://127.0.0.1:{webui_port}[/bold white]"
+                f" [dim](pid={webui_pid})[/dim]"
+            )
         else:
-            lines.append("WebUI:  [dim]○[/dim] not running")
+            lines.append("[bold]WebUI:[/bold]  [bold red]○ stopped[/bold red]")
 
         # Claude CLI
         claude_path = shutil.which("claude")
         if claude_path:
-            lines.append(f"Claude: [green]✓[/green] available ({claude_path})")
+            lines.append(f"[bold]Claude:[/bold] [bold green]✓ available[/bold green] [dim]({claude_path})[/dim]")
         else:
-            lines.append("Claude: [red]✗[/red] not found")
+            lines.append("[bold]Claude:[/bold] [bold red]✗ not found[/bold red]")
 
         return "\n".join(lines)
 

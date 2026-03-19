@@ -35,6 +35,10 @@ target/
 # Bundled daemon binaries (placed by CI)
 head/bin/codecast-daemon-*
 
+# Superpowers (local tooling, not committed)
+.superpowers/
+docs/superpowers/
+
 # OS
 .DS_Store
 Thumbs.db

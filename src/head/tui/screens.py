@@ -19,6 +19,13 @@ from .widgets import MachineTable, StatusPanel
 
 logger = logging.getLogger(__name__)
 
+LOGO = r"""[bold cyan]
+   ___          _                    _
+  / __\___   __| | ___  ___ __ _ ___| |_
+ / /  / _ \ / _` |/ _ \/ __/ _` / __| __|
+/ /__| (_) | (_| |  __/ (_| (_| \__ \ |_
+\____/\___/ \__,_|\___|\___\__,_|___/\__|[/bold cyan]"""
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -124,8 +131,12 @@ class DashboardScreen(Screen):
         ("x", "remove_machine", "Remove Machine"),
         ("j", "cursor_down", "Down"),
         ("k", "cursor_up", "Up"),
-        ("l", "drill_machine", "Drill"),
-        ("enter", "drill_machine", "Drill"),
+        ("down", "cursor_down", "Down"),
+        ("up", "cursor_up", "Up"),
+        ("l", "open_machine", "Enter"),
+        ("right", "open_machine", "Enter"),
+        ("enter", "open_machine", "Enter"),
+        ("escape", "quit_app", "Quit"),
         ("question_mark", "show_help", "Help"),
         ("q", "quit_app", "Quit"),
     ]
@@ -142,14 +153,15 @@ class DashboardScreen(Screen):
         machine_count = len(cfg.peers) if cfg else 0
 
         yield Vertical(
+            Static(LOGO, id="logo"),
             Vertical(
-                Static("[bold]Status[/bold]", id="status_panel_title"),
+                Static("[bold cyan]Status[/bold cyan]", id="status_panel_title"),
                 StatusPanel(config_path=self.config_path, id="status"),
                 id="status_panel_container",
             ),
             Vertical(
                 Static(
-                    f"[bold]Machines ({machine_count} configured)[/bold]",
+                    f"[bold cyan]Machines[/bold cyan] [bold white]({machine_count} configured)[/bold white]",
                     id="machine_table_title",
                 ),
                 MachineTable(self.config_path, id="machine_table"),
@@ -190,7 +202,7 @@ class DashboardScreen(Screen):
             remove_machine_from_config(cfg, name)
             table.refresh_machines()
             title = self.query_one("#machine_table_title", Static)
-            title.update(f"[bold]Machines ({table.machine_count} configured)[/bold]")
+            title.update(f"[bold cyan]Machines[/bold cyan] [bold white]({table.machine_count} configured)[/bold white]")
             self.notify(f"Removed machine: {name}")
         except Exception as exc:
             self.notify(f"Failed to remove machine: {exc}", severity="error")
@@ -209,7 +221,7 @@ class DashboardScreen(Screen):
         except Exception:
             pass
 
-    def action_drill_machine(self) -> None:
+    def action_open_machine(self) -> None:
         """Open sessions screen filtered to the selected machine."""
         try:
             table = self.query_one("#machine_table", MachineTable)
@@ -231,7 +243,7 @@ class DashboardScreen(Screen):
             table = self.query_one("#machine_table", MachineTable)
             table.refresh_machines()
             title = self.query_one("#machine_table_title", Static)
-            title.update(f"[bold]Machines ({table.machine_count} configured)[/bold]")
+            title.update(f"[bold cyan]Machines[/bold cyan] [bold white]({table.machine_count} configured)[/bold white]")
         except Exception:
             pass
 
@@ -267,13 +279,15 @@ class HelpScreen(Screen):
             "  [cyan]?[/cyan]  Show this help screen\n"
             "  [cyan]q[/cyan]  Quit\n"
             "\n"
-            "[bold]Vim navigation:[/bold]\n"
-            "  [cyan]j[/cyan]      Move cursor down\n"
-            "  [cyan]k[/cyan]      Move cursor up\n"
-            "  [cyan]l[/cyan]      Drill into machine sessions\n"
-            "  [cyan]h[/cyan]      Go back (in sessions view)\n"
-            "  [cyan]Enter[/cyan]  Select / drill in\n"
-            "  [cyan]Esc[/cyan]    Go back / close current screen\n"
+            "[bold]Navigation:[/bold]\n"
+            "  [cyan]j / ↓[/cyan]     Move cursor down\n"
+            "  [cyan]k / ↑[/cyan]     Move cursor up\n"
+            "  [cyan]l / → / Enter[/cyan]  Open machine sessions\n"
+            "  [cyan]h / ← / Esc[/cyan]   Go back\n"
+            "\n"
+            "[bold]Sessions view:[/bold]\n"
+            "  [cyan]t[/cyan]         Toggle sort (newest/oldest)\n"
+            "  [cyan]r / Del[/cyan]   Remove selected session\n"
             "\n"
             "[bold]CLI equivalents:[/bold]\n"
             "  codecast start       Start the daemon\n"
@@ -331,12 +345,14 @@ class StartHeadScreen(Screen):
 
         summary_lines = []
         if head_running:
-            summary_lines.append(f"Head node is [green]running[/green] (pid={head_pid}).")
+            summary_lines.append(f"Head node is [bold green]● running[/bold green] [dim](pid={head_pid})[/dim]")
         else:
-            summary_lines.append("Head node is [dim]not running[/dim].")
-        summary_lines.append(f"Config:  {self.config_path}")
-        summary_lines.append(f"Bots:    {', '.join(bots_configured) if bots_configured else '[dim]none[/dim]'}")
-        summary_lines.append(f"Machines: {len(peers)} configured")
+            summary_lines.append("Head node is [bold red]○ stopped[/bold red]")
+        summary_lines.append(f"[bold]Config:[/bold]   {self.config_path}")
+        summary_lines.append(
+            f"[bold]Bots:[/bold]     {', '.join(bots_configured) if bots_configured else '[dim]none[/dim]'}"
+        )
+        summary_lines.append(f"[bold]Machines:[/bold] {len(peers)} configured")
 
         options: list[Option] = []
         if head_running:
@@ -424,12 +440,14 @@ class StartDaemonScreen(Screen):
         claude_available = _check_claude_cli()
 
         if daemon_running:
-            pid_part = f" (pid={daemon_pid})" if daemon_pid and _pid_alive(daemon_pid) else ""
-            msg = f"Daemon is [green]running[/green] on port {daemon_port}{pid_part}."
+            pid_part = f" [dim](pid={daemon_pid})[/dim]" if daemon_pid and _pid_alive(daemon_pid) else ""
+            msg = (
+                f"Daemon is [bold green]● running[/bold green] on port [bold white]{daemon_port}[/bold white]{pid_part}"
+            )
         elif not claude_available:
-            msg = "Claude CLI not found on PATH.\nInstall Claude CLI first to run the daemon."
+            msg = "[bold red]✗[/bold red] Claude CLI not found on PATH.\nInstall Claude CLI first to run the daemon."
         else:
-            msg = "Daemon is [dim]not running[/dim]. Claude CLI is available."
+            msg = "Daemon is [bold red]○ stopped[/bold red]. Claude CLI is [green]available[/green]."
 
         options: list[Option] = []
         if daemon_running:
@@ -573,8 +591,13 @@ class AddMachineScreen(Screen):
             ssh_entries = []
             existing = set()
 
-        # Filter out already-configured machines
-        available = [e for e in ssh_entries if e.name not in existing]
+        # Filter out already-configured machines and deduplicate by name
+        seen: set[str] = set()
+        available: list = []
+        for e in ssh_entries:
+            if e.name not in existing and e.name not in seen:
+                seen.add(e.name)
+                available.append(e)
 
         prompt = self.query_one("#add_machine_prompt", Static)
         method_list = self.query_one("#add_machine_method", OptionList)
@@ -702,6 +725,28 @@ AddPeerScreen = AddMachineScreen
 # ---------------------------------------------------------------------------
 
 
+_DISCORD_GUIDANCE = (
+    "[bold]Discord Bot Setup[/bold]\n"
+    "\n"
+    "1. Go to [cyan]https://discord.com/developers/applications[/cyan]\n"
+    "2. Click [bold]New Application[/bold] → name it (e.g. Codecast)\n"
+    "3. Go to [bold]Bot[/bold] tab → click [bold]Reset Token[/bold] → copy the token\n"
+    "4. Enable [bold]Message Content Intent[/bold] under Privileged Intents\n"
+    "5. Go to [bold]OAuth2 → URL Generator[/bold] → select [cyan]bot[/cyan] scope\n"
+    "6. Select permissions: Send Messages, Read Message History, Use Slash Commands\n"
+    "7. Copy the generated URL and open it to invite the bot to your server\n"
+)
+
+_TELEGRAM_GUIDANCE = (
+    "[bold]Telegram Bot Setup[/bold]\n"
+    "\n"
+    "1. Open Telegram and message [cyan]@BotFather[/cyan]\n"
+    "2. Send [bold]/newbot[/bold] and follow the prompts to name your bot\n"
+    "3. Copy the API token BotFather gives you (format: [dim]123456:ABC-DEF...[/dim])\n"
+    "4. Optionally send [bold]/setcommands[/bold] to register bot commands\n"
+)
+
+
 class ConfigBotScreen(Screen):
     """Screen for configuring a bot (Discord or Telegram)."""
 
@@ -714,10 +759,16 @@ class ConfigBotScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        guidance = _DISCORD_GUIDANCE if self.bot_type == "discord" else _TELEGRAM_GUIDANCE
+        if self.bot_type == "discord":
+            placeholder = "Paste Discord bot token (e.g. MTIz...)"
+        else:
+            placeholder = "Paste Telegram bot token (e.g. 123456:ABC-DEF...)"
         yield Vertical(
             Static(f"Configure {self.bot_type.capitalize()} bot\n", id="bot_title"),
+            Static(guidance, id="bot_guidance"),
             Static(f"Enter {self.bot_type} bot token:", id="bot_prompt"),
-            Input(placeholder="Bot token", password=True, id="bot_token_input"),
+            Input(placeholder=placeholder, password=True, id="bot_token_input"),
             id="bot_config_container",
         )
         yield Footer()
@@ -767,13 +818,17 @@ class SessionsScreen(Screen):
     BINDINGS = [
         ("escape", "go_back", "Back"),
         ("h", "go_back", "Back"),
+        ("left", "go_back", "Back"),
         ("t", "toggle_sort", "Toggle sort"),
         ("r", "remove_session", "Remove"),
         ("delete", "remove_session", "Remove"),
         ("j", "cursor_down", "Down"),
         ("k", "cursor_up", "Up"),
-        ("l", "drill_or_enter", "Drill"),
-        ("enter", "drill_or_enter", "Drill"),
+        ("down", "cursor_down", "Down"),
+        ("up", "cursor_up", "Up"),
+        ("l", "open_or_enter", "Enter"),
+        ("right", "open_or_enter", "Enter"),
+        ("enter", "open_or_enter", "Enter"),
     ]
 
     def __init__(self, config_path: str, filter_machine: str | None = None) -> None:
@@ -788,7 +843,7 @@ class SessionsScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Vertical(
-            Static("[bold]Sessions[/bold]\n", id="sessions_title"),
+            Static("[bold cyan]Sessions[/bold cyan]\n", id="sessions_title"),
             DataTable(id="sessions_table"),
             Static("", id="sessions_info"),
             id="sessions_container",
@@ -812,9 +867,12 @@ class SessionsScreen(Screen):
         sessions = self._sessions
         if self._filter_machine:
             sessions = [s for s in sessions if s.machine_id == self._filter_machine]
-            title.update(f"[bold]Sessions — {self._filter_machine}[/bold] [dim](h=back)[/dim]\n")
+            title.update(
+                f"[bold cyan]Sessions[/bold cyan] — [bold white]{self._filter_machine}[/bold white]"
+                " [dim](← back)[/dim]\n"
+            )
         else:
-            title.update("[bold]Sessions[/bold]\n")
+            title.update("[bold cyan]Sessions[/bold cyan]\n")
 
         if not sessions:
             info.update("[dim]No sessions found.[/dim]")
@@ -853,12 +911,22 @@ class SessionsScreen(Screen):
                 created = s.created_at[:16].replace("T", " ") if s.created_at else ""
                 path_display = s.path if len(s.path) <= 30 else "..." + s.path[-27:]
                 indent = "  " if not self._filter_machine else ""
+                # Color-code status
+                status = s.status
+                if status == "active":
+                    status_display = "[bold green]active[/bold green]"
+                elif status == "detached":
+                    status_display = "[yellow]detached[/yellow]"
+                elif status == "destroyed":
+                    status_display = "[red]destroyed[/red]"
+                else:
+                    status_display = f"[dim]{status}[/dim]"
                 table.add_row(
-                    f"{indent}{s.name or s.daemon_session_id[:8]}",
-                    path_display,
-                    s.mode,
-                    s.status,
-                    created,
+                    f"{indent}[bold]{s.name or s.daemon_session_id[:8]}[/bold]",
+                    f"[dim]{path_display}[/dim]",
+                    f"[cyan]{s.mode}[/cyan]",
+                    status_display,
+                    f"[dim]{created}[/dim]",
                     key=f"session_{s.channel_id}",
                 )
                 self._row_session_map[row_idx] = s
@@ -940,8 +1008,8 @@ class SessionsScreen(Screen):
         except Exception:
             pass
 
-    def action_drill_or_enter(self) -> None:
-        """Drill into a machine's sessions when on a header row."""
+    def action_open_or_enter(self) -> None:
+        """Open a machine's sessions when on a header row."""
         if self._filter_machine:
             return
         table = self.query_one("#sessions_table", DataTable)
@@ -987,9 +1055,13 @@ class StartWebUIScreen(Screen):
         webui_running = webui_pid is not None and _pid_alive(webui_pid)
 
         if webui_running:
-            msg = f"WebUI is [green]running[/green] on http://127.0.0.1:{webui_port} (pid={webui_pid})."
+            msg = (
+                f"WebUI is [bold green]● running[/bold green]"
+                f" on [bold white]http://127.0.0.1:{webui_port}[/bold white]"
+                f" [dim](pid={webui_pid})[/dim]"
+            )
         else:
-            msg = "WebUI is [dim]not running[/dim]."
+            msg = "WebUI is [bold red]○ stopped[/bold red]"
 
         options: list[Option] = []
         if webui_running:

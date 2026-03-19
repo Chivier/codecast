@@ -14,7 +14,7 @@ class TestSSHTransportBasic(unittest.TestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
             daemon_port=9100,
             local_port=19100,
         )
@@ -24,7 +24,7 @@ class TestSSHTransportBasic(unittest.TestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
         )
         assert t.get_auth_headers() == {}
 
@@ -32,7 +32,7 @@ class TestSSHTransportBasic(unittest.TestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
         )
         assert t.is_alive() is False
 
@@ -40,7 +40,7 @@ class TestSSHTransportBasic(unittest.TestCase):
         t = SSHTransport(
             peer_id="my-lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
         )
         assert t.peer_id == "my-lab"
 
@@ -48,7 +48,7 @@ class TestSSHTransportBasic(unittest.TestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
         )
         # Should auto-allocate a local port
         assert isinstance(t._local_port, int)
@@ -58,7 +58,7 @@ class TestSSHTransportBasic(unittest.TestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
             local_port=19200,
         )
         assert t._local_port == 19200
@@ -67,7 +67,7 @@ class TestSSHTransportBasic(unittest.TestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
         )
         assert t.connection is None
 
@@ -75,7 +75,7 @@ class TestSSHTransportBasic(unittest.TestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
         )
         mock_conn = MagicMock()
         mock_conn.is_closed.return_value = True
@@ -86,7 +86,7 @@ class TestSSHTransportBasic(unittest.TestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
         )
         mock_conn = MagicMock()
         mock_conn.is_closed.return_value = False
@@ -114,7 +114,7 @@ class TestSSHTransportConnect(unittest.IsolatedAsyncioTestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
             daemon_port=9100,
             local_port=19100,
         )
@@ -139,7 +139,7 @@ class TestSSHTransportConnect(unittest.IsolatedAsyncioTestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
             ssh_key="/home/testuser/.ssh/id_rsa",
             local_port=19100,
         )
@@ -157,7 +157,7 @@ class TestSSHTransportConnect(unittest.IsolatedAsyncioTestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
             password="secret",
             local_port=19100,
         )
@@ -184,7 +184,7 @@ class TestSSHTransportConnect(unittest.IsolatedAsyncioTestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
             proxy_jump="bastion",
             peer_configs=peer_configs,
             local_port=19100,
@@ -210,7 +210,7 @@ class TestSSHTransportConnect(unittest.IsolatedAsyncioTestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
             ssh_port=2222,
             local_port=19100,
         )
@@ -231,7 +231,7 @@ class TestSSHTransportConnect(unittest.IsolatedAsyncioTestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
             local_port=19100,
         )
         await t.connect()
@@ -248,7 +248,7 @@ class TestSSHTransportConnect(unittest.IsolatedAsyncioTestCase):
         t = SSHTransport(
             peer_id="lab",
             ssh_host="10.0.1.8",
-            ssh_user="youruser",
+            ssh_user="testuser",
         )
         # Should not raise
         await t.close()

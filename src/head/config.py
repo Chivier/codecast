@@ -933,6 +933,29 @@ def save_config_v2(cfg: Config, config_path: str) -> None:
         "log_file": cfg.daemon.log_file,
     }
 
+    # File pool
+    fp = cfg.file_pool
+    fp_dict: dict[str, Any] = {
+        "max_size": fp.max_size,
+        "pool_dir": fp.pool_dir,
+        "remote_dir": fp.remote_dir,
+    }
+    if fp.allowed_types != list(DEFAULT_ALLOWED_FILE_TYPES):
+        fp_dict["allowed_types"] = fp.allowed_types
+    data["file_pool"] = fp_dict
+
+    # File forward
+    ff = cfg.file_forward
+    ff_dict: dict[str, Any] = {
+        "enabled": ff.enabled,
+        "default_max_size": ff.default_max_size,
+        "default_auto": ff.default_auto,
+        "download_dir": ff.download_dir,
+    }
+    if ff.rules:
+        ff_dict["rules"] = [{"pattern": r.pattern, "max_size": r.max_size, "auto": r.auto} for r in ff.rules]
+    data["file_forward"] = ff_dict
+
     path = Path(config_path)
     with open(path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)

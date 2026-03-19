@@ -16,8 +16,8 @@ discord.py>=2.3.0
 # Telegram bot
 python-telegram-bot>=20.0
 
-# Lark/Feishu bot
-lark-oapi>=1.4.0
+# Lark/Feishu bot (optional — only needed if using Lark/Feishu integration)
+# lark-oapi>=1.4.0
 
 # TUI
 textual>=0.50.0

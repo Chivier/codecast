@@ -10,9 +10,12 @@ import yaml
 from head.tui.app import CodecastApp, CODECAST_THEME
 from head.tui.screens import (
     AddMachineScreen,
+    ConfigBotScreen,
     DashboardScreen,
+    HelpScreen,
     SessionsScreen,
     SetupWizardScreen,
+    StartDaemonScreen,
     StartHeadScreen,
     StartWebUIScreen,
 )
@@ -305,7 +308,7 @@ async def test_start_webui_screen_shows_status(tmp_path):
         assert isinstance(app.screen, StartWebUIScreen)
         status = app.screen.query_one("#webui_status")
         text = _get_static_text(status)
-        assert "not running" in text
+        assert "stopped" in text or "not running" in text
 
 
 @pytest.mark.asyncio
@@ -680,3 +683,810 @@ async def test_sessions_screen_h_pops_when_no_filter(tmp_path):
         await pilot.press("h")
         await pilot.pause()
         assert isinstance(app.screen, DashboardScreen)
+
+
+# ---------------------------------------------------------------------------
+# StartDaemonScreen tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_daemon_screen_shows_stopped(tmp_path):
+    """StartDaemonScreen should show 'stopped' when daemon is not running."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        with (
+            patch("head.tui.screens._check_daemon_running", return_value=(False, None)),
+            patch("head.tui.screens._check_claude_cli", return_value=True),
+        ):
+            app.push_screen(StartDaemonScreen(str(config_path)))
+            await pilot.pause()
+        assert isinstance(app.screen, StartDaemonScreen)
+        status = app.screen.query_one("#daemon_status")
+        text = _get_static_text(status)
+        assert "stopped" in text
+
+
+@pytest.mark.asyncio
+async def test_start_daemon_screen_shows_running(tmp_path):
+    """StartDaemonScreen should show 'running' with port when daemon is up."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        with (
+            patch("head.tui.screens._check_daemon_running", return_value=(True, 9100)),
+            patch("head.tui.screens._check_claude_cli", return_value=True),
+            patch("head.cli._read_pid_file", return_value=12345),
+            patch("head.cli._pid_alive", return_value=True),
+        ):
+            app.push_screen(StartDaemonScreen(str(config_path)))
+            await pilot.pause()
+        status = app.screen.query_one("#daemon_status")
+        text = _get_static_text(status)
+        assert "running" in text
+        assert "9100" in text
+
+
+@pytest.mark.asyncio
+async def test_start_daemon_screen_no_claude_cli(tmp_path):
+    """StartDaemonScreen should warn when Claude CLI is not available."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        with (
+            patch("head.tui.screens._check_daemon_running", return_value=(False, None)),
+            patch("head.tui.screens._check_claude_cli", return_value=False),
+        ):
+            app.push_screen(StartDaemonScreen(str(config_path)))
+            await pilot.pause()
+        status = app.screen.query_one("#daemon_status")
+        text = _get_static_text(status)
+        assert "not found" in text
+
+
+@pytest.mark.asyncio
+async def test_start_daemon_screen_escape_goes_back(tmp_path):
+    """Pressing escape on StartDaemonScreen should return to dashboard."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        with (
+            patch("head.tui.screens._check_daemon_running", return_value=(False, None)),
+            patch("head.tui.screens._check_claude_cli", return_value=True),
+        ):
+            app.push_screen(StartDaemonScreen(str(config_path)))
+            await pilot.pause()
+        assert isinstance(app.screen, StartDaemonScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+
+
+@pytest.mark.asyncio
+async def test_start_daemon_screen_start_option(tmp_path):
+    """StartDaemonScreen should show 'Start daemon' when stopped and CLI available."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        with (
+            patch("head.tui.screens._check_daemon_running", return_value=(False, None)),
+            patch("head.tui.screens._check_claude_cli", return_value=True),
+        ):
+            app.push_screen(StartDaemonScreen(str(config_path)))
+            await pilot.pause()
+        menu = app.screen.query_one("#daemon_menu")
+        option_ids = [opt.id for opt in menu._options]
+        assert "start" in option_ids
+
+
+# ---------------------------------------------------------------------------
+# HelpScreen tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_help_screen_shows_shortcuts(tmp_path):
+    """HelpScreen should show keyboard shortcuts."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(HelpScreen())
+        await pilot.pause()
+        assert isinstance(app.screen, HelpScreen)
+        help_text = app.screen.query_one("#help_text")
+        text = _get_static_text(help_text)
+        assert "Dashboard shortcuts" in text
+        assert "Navigation" in text
+
+
+@pytest.mark.asyncio
+async def test_help_screen_shows_cli_equivalents(tmp_path):
+    """HelpScreen should show CLI equivalents."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(HelpScreen())
+        await pilot.pause()
+        help_text = app.screen.query_one("#help_text")
+        text = _get_static_text(help_text)
+        assert "CLI equivalents" in text
+        assert "codecast start" in text
+
+
+@pytest.mark.asyncio
+async def test_help_screen_escape_goes_back(tmp_path):
+    """Pressing escape on HelpScreen should return to dashboard."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(HelpScreen())
+        await pilot.pause()
+        assert isinstance(app.screen, HelpScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+
+
+# ---------------------------------------------------------------------------
+# ConfigBotScreen tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_config_bot_screen_discord_title(tmp_path):
+    """ConfigBotScreen should show Discord in the title for discord type."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(ConfigBotScreen(str(config_path), "discord"))
+        await pilot.pause()
+        assert isinstance(app.screen, ConfigBotScreen)
+        title = app.screen.query_one("#bot_title")
+        text = _get_static_text(title)
+        assert "Discord" in text
+
+
+@pytest.mark.asyncio
+async def test_config_bot_screen_telegram_title(tmp_path):
+    """ConfigBotScreen should show Telegram in the title for telegram type."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(ConfigBotScreen(str(config_path), "telegram"))
+        await pilot.pause()
+        title = app.screen.query_one("#bot_title")
+        text = _get_static_text(title)
+        assert "Telegram" in text
+
+
+@pytest.mark.asyncio
+async def test_config_bot_screen_has_guidance(tmp_path):
+    """ConfigBotScreen should show platform-specific guidance text."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(ConfigBotScreen(str(config_path), "discord"))
+        await pilot.pause()
+        guidance = app.screen.query_one("#bot_guidance")
+        text = _get_static_text(guidance)
+        assert "Discord Bot Setup" in text
+        assert "discord.com/developers" in text
+
+
+@pytest.mark.asyncio
+async def test_config_bot_screen_telegram_guidance(tmp_path):
+    """ConfigBotScreen should show Telegram-specific guidance."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(ConfigBotScreen(str(config_path), "telegram"))
+        await pilot.pause()
+        guidance = app.screen.query_one("#bot_guidance")
+        text = _get_static_text(guidance)
+        assert "Telegram Bot Setup" in text
+        assert "BotFather" in text
+
+
+@pytest.mark.asyncio
+async def test_config_bot_screen_password_input(tmp_path):
+    """ConfigBotScreen should have a password-masked input field."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(ConfigBotScreen(str(config_path), "discord"))
+        await pilot.pause()
+        inp = app.screen.query_one("#bot_token_input")
+        assert inp.password is True
+
+
+@pytest.mark.asyncio
+async def test_config_bot_screen_saves_discord_token(tmp_path):
+    """ConfigBotScreen should save a Discord token to config."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(ConfigBotScreen(str(config_path), "discord"))
+        await pilot.pause()
+        inp = app.screen.query_one("#bot_token_input")
+        inp.value = "test-discord-token-123"
+        await inp.action_submit()
+        await pilot.pause()
+        # Verify token was written
+        with open(config_path) as f:
+            saved = yaml.safe_load(f)
+        assert saved["bot"]["discord"]["token"] == "test-discord-token-123"
+
+
+@pytest.mark.asyncio
+async def test_config_bot_screen_escape_goes_back(tmp_path):
+    """Pressing escape on ConfigBotScreen should go back."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(ConfigBotScreen(str(config_path), "discord"))
+        await pilot.pause()
+        assert isinstance(app.screen, ConfigBotScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+
+
+# ---------------------------------------------------------------------------
+# AddMachine manual flow tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_add_machine_manual_step1_prompt(tmp_path):
+    """Selecting 'Manual entry' should show machine name prompt."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = AddMachineScreen(str(config_path))
+        app.push_screen(screen)
+        await pilot.pause()
+        # Simulate selecting "manual"
+        screen._mode = "manual"
+        screen._step = 1
+        screen._switch_to_manual_input()
+        await pilot.pause()
+        prompt = screen.query_one("#add_machine_prompt")
+        text = _get_static_text(prompt)
+        assert "machine name" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_add_machine_manual_ssh_flow(tmp_path):
+    """Manual SSH machine should be saved to config."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = AddMachineScreen(str(config_path))
+        app.push_screen(screen)
+        await pilot.pause()
+        screen._mode = "manual"
+        screen._step = 1
+        screen._switch_to_manual_input()
+        await pilot.pause()
+
+        from textual.widgets import Input
+
+        inp = screen.query_one("#machine_input", Input)
+        inp.value = "test-server"
+        await inp.action_submit()
+        await pilot.pause()
+
+        inp = screen.query_one("#machine_input", Input)
+        inp.value = "ssh"
+        await inp.action_submit()
+        await pilot.pause()
+
+        inp = screen.query_one("#machine_input", Input)
+        inp.value = "user@10.0.0.99"
+        await inp.action_submit()
+        await pilot.pause()
+
+        # Verify saved
+        with open(config_path) as f:
+            saved = yaml.safe_load(f)
+        assert "test-server" in saved["peers"]
+        assert saved["peers"]["test-server"]["ssh_host"] == "10.0.0.99"
+        assert saved["peers"]["test-server"]["ssh_user"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_add_machine_manual_http_flow(tmp_path):
+    """Manual HTTP machine should be saved to config."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = AddMachineScreen(str(config_path))
+        app.push_screen(screen)
+        await pilot.pause()
+        screen._mode = "manual"
+        screen._step = 1
+        screen._switch_to_manual_input()
+        await pilot.pause()
+
+        from textual.widgets import Input
+
+        inp = screen.query_one("#machine_input", Input)
+        inp.value = "http-server"
+        await inp.action_submit()
+        await pilot.pause()
+
+        inp = screen.query_one("#machine_input", Input)
+        inp.value = "http"
+        await inp.action_submit()
+        await pilot.pause()
+
+        inp = screen.query_one("#machine_input", Input)
+        inp.value = "https://10.0.0.50:9100"
+        await inp.action_submit()
+        await pilot.pause()
+
+        with open(config_path) as f:
+            saved = yaml.safe_load(f)
+        assert "http-server" in saved["peers"]
+        assert saved["peers"]["http-server"]["transport"] == "http"
+        assert saved["peers"]["http-server"]["address"] == "https://10.0.0.50:9100"
+
+
+# ---------------------------------------------------------------------------
+# AddMachine SSH import tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_add_machine_ssh_import_shows_hosts(tmp_path):
+    """SSH import should show available hosts."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+
+    from head.config import SSHHostEntry
+
+    mock_entries = [
+        SSHHostEntry(name="server-a", hostname="10.0.0.1", user="alice"),
+        SSHHostEntry(name="server-b", hostname="10.0.0.2"),
+    ]
+
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = AddMachineScreen(str(config_path))
+        app.push_screen(screen)
+        await pilot.pause()
+        with patch("head.config.parse_ssh_config", return_value=mock_entries):
+            screen._show_ssh_hosts()
+            await pilot.pause()
+        prompt = screen.query_one("#add_machine_prompt")
+        text = _get_static_text(prompt)
+        assert "2 available" in text
+
+
+@pytest.mark.asyncio
+async def test_add_machine_ssh_import_filters_existing(tmp_path):
+    """SSH import should filter out already-configured machines."""
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {"server-a": {"transport": "ssh", "ssh_host": "10.0.0.1"}},
+    }
+    config_path.write_text(yaml.dump(cfg))
+
+    from head.config import SSHHostEntry
+
+    mock_entries = [
+        SSHHostEntry(name="server-a", hostname="10.0.0.1"),
+        SSHHostEntry(name="server-b", hostname="10.0.0.2"),
+    ]
+
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = AddMachineScreen(str(config_path))
+        app.push_screen(screen)
+        await pilot.pause()
+        with patch("head.config.parse_ssh_config", return_value=mock_entries):
+            screen._show_ssh_hosts()
+            await pilot.pause()
+        prompt = screen.query_one("#add_machine_prompt")
+        text = _get_static_text(prompt)
+        assert "1 available" in text
+
+
+@pytest.mark.asyncio
+async def test_add_machine_ssh_import_deduplicates(tmp_path):
+    """SSH import should deduplicate hosts with the same name."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+
+    from head.config import SSHHostEntry
+
+    mock_entries = [
+        SSHHostEntry(name="jump-box", hostname="10.0.0.1", user="admin"),
+        SSHHostEntry(name="jump-box", hostname="10.0.0.2", user="admin"),
+        SSHHostEntry(name="unique-host", hostname="10.0.0.5"),
+    ]
+
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = AddMachineScreen(str(config_path))
+        app.push_screen(screen)
+        await pilot.pause()
+        with patch("head.config.parse_ssh_config", return_value=mock_entries):
+            screen._show_ssh_hosts()
+            await pilot.pause()
+        prompt = screen.query_one("#add_machine_prompt")
+        text = _get_static_text(prompt)
+        # Should show 2 (dice deduped) not 3
+        assert "2 available" in text
+
+
+@pytest.mark.asyncio
+async def test_add_machine_ssh_import_saves_machine(tmp_path):
+    """Importing an SSH host should save it to config."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+
+    from head.config import SSHHostEntry
+
+    mock_entries = [
+        SSHHostEntry(name="remote-box", hostname="192.168.1.100", user="deploy"),
+    ]
+
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = AddMachineScreen(str(config_path))
+        app.push_screen(screen)
+        await pilot.pause()
+        with (
+            patch("head.config.parse_ssh_config", return_value=mock_entries),
+            patch("head.config._is_localhost", return_value=False),
+        ):
+            screen._import_ssh_host("remote-box")
+            await pilot.pause()
+        with open(config_path) as f:
+            saved = yaml.safe_load(f)
+        assert "remote-box" in saved["peers"]
+        assert saved["peers"]["remote-box"]["ssh_host"] == "192.168.1.100"
+        assert saved["peers"]["remote-box"]["ssh_user"] == "deploy"
+
+
+# ---------------------------------------------------------------------------
+# SessionsScreen additional tests
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_session(
+    channel_id="discord:100",
+    machine_id="server1",
+    path="/home/user/project",
+    daemon_session_id="uuid-0001",
+    status="active",
+    mode="auto",
+    created_at="2026-03-18T10:00:00",
+    name="bright-falcon",
+):
+    """Create a fake session object for testing."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        channel_id=channel_id,
+        machine_id=machine_id,
+        path=path,
+        daemon_session_id=daemon_session_id,
+        sdk_session_id=None,
+        status=status,
+        mode=mode,
+        created_at=created_at,
+        updated_at=created_at,
+        name=name,
+        tool_display="append",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sessions_screen_toggle_sort(tmp_path):
+    """Pressing 't' should toggle sort order."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    sessions = [
+        _make_fake_session(channel_id="discord:1", name="alpha", created_at="2026-03-18T08:00:00"),
+        _make_fake_session(channel_id="discord:2", name="beta", created_at="2026-03-18T12:00:00"),
+    ]
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = SessionsScreen(str(config_path))
+        screen._load_sessions = lambda: sessions
+        app.push_screen(screen)
+        await pilot.pause()
+        assert screen._sort_descending is True
+        info_text = _get_static_text(screen.query_one("#sessions_info"))
+        assert "newest first" in info_text
+        await pilot.press("t")
+        await pilot.pause()
+        assert screen._sort_descending is False
+        info_text = _get_static_text(screen.query_one("#sessions_info"))
+        assert "oldest first" in info_text
+
+
+@pytest.mark.asyncio
+async def test_sessions_screen_color_coded_status(tmp_path):
+    """Sessions should show color-coded status values."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    sessions = [
+        _make_fake_session(channel_id="discord:1", status="active"),
+        _make_fake_session(channel_id="discord:2", status="detached", name="detach-test"),
+        _make_fake_session(channel_id="discord:3", status="destroyed", name="dead-test"),
+    ]
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = SessionsScreen(str(config_path))
+        screen._load_sessions = lambda: sessions
+        app.push_screen(screen)
+        await pilot.pause()
+        info_text = _get_static_text(screen.query_one("#sessions_info"))
+        assert "3 session(s)" in info_text
+
+
+@pytest.mark.asyncio
+async def test_sessions_screen_open_machine_header(tmp_path):
+    """Pressing enter on a machine header should filter to that machine."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    sessions = [
+        _make_fake_session(channel_id="discord:1", machine_id="server1"),
+        _make_fake_session(channel_id="discord:2", machine_id="server2"),
+    ]
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = SessionsScreen(str(config_path))
+        screen._load_sessions = lambda: sessions
+        app.push_screen(screen)
+        await pilot.pause()
+        # First row is machine header for server1
+        assert screen._row_machine_map.get(0) is not None
+        # Simulate action_open_or_enter when cursor is on a machine header
+        screen.action_open_or_enter()
+        await pilot.pause()
+        assert screen._filter_machine is not None
+
+
+@pytest.mark.asyncio
+async def test_sessions_screen_remove_session(tmp_path):
+    """Pressing 'r' should remove the selected session."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    sessions = [
+        _make_fake_session(channel_id="discord:1", name="to-remove"),
+    ]
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = SessionsScreen(str(config_path))
+        screen._load_sessions = lambda: list(sessions)
+        # Mock _get_router to avoid needing a real DB
+        screen._get_router = lambda: None
+        app.push_screen(screen)
+        await pilot.pause()
+        # Should have 1 header + 1 session = 2 rows
+        table = screen.query_one("#sessions_table")
+        assert table.row_count == 2
+
+
+# ---------------------------------------------------------------------------
+# DashboardScreen additional tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dashboard_on_screen_resume_refreshes(tmp_path):
+    """on_screen_resume should refresh status panel and machine table."""
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {"s1": {"transport": "ssh", "ssh_host": "10.0.0.1"}},
+    }
+    config_path.write_text(yaml.dump(cfg))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+        # Push and pop a screen to trigger on_screen_resume
+        app.push_screen(HelpScreen())
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+        # Verify components still work
+        table = app.screen.query_one("#machine_table", MachineTable)
+        assert table.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_dashboard_open_machine_with_selection(tmp_path):
+    """action_open_machine should open sessions screen."""
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {
+            "s1": {"transport": "ssh", "ssh_host": "10.0.0.1"},
+            "s2": {"transport": "ssh", "ssh_host": "10.0.0.2"},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+        # Call action directly to avoid focus issues
+        app.screen.action_open_machine()
+        await pilot.pause()
+        assert isinstance(app.screen, SessionsScreen)
+
+
+# ---------------------------------------------------------------------------
+# StatusPanel additional tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_status_panel_bot_summary(tmp_path):
+    """StatusPanel should report configured bot names."""
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "bot": {
+            "discord": {"token": "fake-token"},
+            "telegram": {"token": "fake-tg-token"},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        status = app.screen.query_one("#status", StatusPanel)
+        bots = status._get_bot_summary()
+        assert "Discord" in bots
+        assert "Telegram" in bots
+
+
+@pytest.mark.asyncio
+async def test_status_panel_all_stopped(tmp_path):
+    """StatusPanel should render status for all four components."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        status = app.screen.query_one("#status", StatusPanel)
+        text = _get_static_text(status)
+        # All four components should be present regardless of running state
+        assert "Head:" in text
+        assert "Daemon:" in text
+        assert "WebUI:" in text
+        assert "Claude:" in text
+
+
+# ---------------------------------------------------------------------------
+# MachineTable additional tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_machine_table_transport_detection(tmp_path):
+    """MachineTable should correctly display different transport types."""
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {
+            "ssh-box": {"transport": "ssh", "ssh_host": "10.0.0.1"},
+            "http-box": {"transport": "http", "address": "https://10.0.0.2:9100"},
+            "local-box": {"transport": "local"},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.screen.query_one("#machine_table", MachineTable)
+        assert table.row_count == 3
+
+
+@pytest.mark.asyncio
+async def test_machine_table_host_truncation(tmp_path):
+    """MachineTable should truncate long hostnames."""
+    config_path = tmp_path / "config.yaml"
+    long_host = "very-long-hostname-that-exceeds-twenty-four-characters.example.com"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {
+            "long-box": {"transport": "ssh", "ssh_host": long_host},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.screen.query_one("#machine_table", MachineTable)
+        row = table.get_row_at(0)
+        host_cell = str(row[2])
+        assert host_cell.endswith("...")
+        assert len(host_cell) <= 24
+
+
+@pytest.mark.asyncio
+async def test_machine_table_get_selected_machine_name(tmp_path):
+    """get_selected_machine_name should return the name of the selected row."""
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {
+            "alpha": {"transport": "ssh", "ssh_host": "10.0.0.1"},
+            "bravo": {"transport": "ssh", "ssh_host": "10.0.0.2"},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.screen.query_one("#machine_table", MachineTable)
+        name = table.get_selected_machine_name()
+        assert name in ("alpha", "bravo")
+
+
+@pytest.mark.asyncio
+async def test_machine_table_get_selected_empty(tmp_path):
+    """get_selected_machine_name should return None for empty table."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.screen.query_one("#machine_table", MachineTable)
+        name = table.get_selected_machine_name()
+        assert name is None

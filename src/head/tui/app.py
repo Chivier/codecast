@@ -38,6 +38,10 @@ class CodecastApp(App):
     #welcome {
         margin-bottom: 1;
     }
+    #logo {
+        margin: 0 2;
+        height: auto;
+    }
     #status_panel_container {
         border: solid $primary;
         padding: 1 2;
@@ -75,6 +79,14 @@ class CodecastApp(App):
     }
     #sessions_info {
         margin-bottom: 1;
+    }
+    #bot_guidance {
+        margin-bottom: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    #bot_config_container {
+        padding: 1 2;
     }
     """
 
