@@ -33,20 +33,45 @@ class StatusPanel(Static):
 
     REFRESH_INTERVAL = 2.0  # seconds between auto-refresh
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, config_path: str = "", **kwargs) -> None:
         super().__init__("", **kwargs)
+        self.config_path = config_path
 
     def on_mount(self) -> None:
         self.update(self._build_status())
         self.set_interval(self.REFRESH_INTERVAL, self.refresh_status)
+
+    def _get_bot_summary(self) -> list[str]:
+        """Return list of configured bot descriptions from config."""
+        if not self.config_path:
+            return []
+        try:
+            from head.config import load_config_v2
+
+            cfg = load_config_v2(self.config_path)
+        except Exception:
+            return []
+        bots: list[str] = []
+        if cfg.bot:
+            if cfg.bot.discord and getattr(cfg.bot.discord, "token", None):
+                bots.append("Discord")
+            if cfg.bot.telegram and getattr(cfg.bot.telegram, "token", None):
+                bots.append("Telegram")
+            if getattr(cfg.bot, "lark", None) and getattr(cfg.bot.lark, "app_id", None):
+                bots.append("Lark")
+        return bots
 
     def _build_status(self) -> str:
         lines: list[str] = []
 
         # Head Node
         head_pid = _read_pid_file(_HEAD_PID_FILE)
-        if head_pid is not None and _pid_alive(head_pid):
+        head_running = head_pid is not None and _pid_alive(head_pid)
+        if head_running:
+            bots = self._get_bot_summary()
+            bot_info = f"  bots: {', '.join(bots)}" if bots else "  bots: [dim]none[/dim]"
             lines.append(f"Head:   [green]●[/green] running (pid={head_pid})")
+            lines.append(bot_info)
         else:
             lines.append("Head:   [dim]○[/dim] not running")
 

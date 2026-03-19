@@ -138,7 +138,7 @@ class DashboardScreen(Screen):
         yield Vertical(
             Vertical(
                 Static(f"[bold]Status[/bold]", id="status_panel_title"),
-                StatusPanel(id="status"),
+                StatusPanel(config_path=self.config_path, id="status"),
                 id="status_panel_container",
             ),
             Vertical(
