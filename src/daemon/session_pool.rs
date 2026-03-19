@@ -52,14 +52,20 @@ impl SessionPool {
     /// Create a new session (lightweight — just registers session state).
     /// No Claude CLI process is spawned until a message is sent.
     pub async fn create(&self, path: &str, mode: PermissionMode) -> Result<String, String> {
-        // Expand ~ to home directory
-        let expanded_path = expand_tilde(path);
+        // Resolve path: expand ~ and handle bare project names
+        let resolved = if path.starts_with('/') || path.starts_with('~') {
+            path.to_string()
+        } else {
+            // Bare name like "myproject" → ~/Projects/myproject
+            format!("~/Projects/{}", path)
+        };
+        let expanded_path = expand_tilde(&resolved);
 
         // Validate path exists on the remote machine
         if !Path::new(&expanded_path).exists() {
             return Err(format!(
-                "Path does not exist on remote machine: {}",
-                expanded_path
+                "Path does not exist on remote machine: {} (resolved from: {})",
+                expanded_path, path
             ));
         }
 

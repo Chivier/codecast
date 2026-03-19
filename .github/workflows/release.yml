@@ -9,19 +9,39 @@ permissions:
   id-token: write
 
 jobs:
-  build-sdist:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+
+      - name: Install and test
+        run: |
+          pip install -e ".[test]"
+          python -m pytest tests/ --ignore=tests/integration -v --tb=short
+
+  build-sdist:
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Build sdist
         run: |
-          pip install build setuptools setuptools-rust
+          pip install build
           python -m build --sdist
+
+      - name: Verify sdist installs cleanly
+        run: |
+          pip install dist/codecast-*.tar.gz
+          python -c "import head; print('sdist install OK')"
 
       - uses: actions/upload-artifact@v4
         with:

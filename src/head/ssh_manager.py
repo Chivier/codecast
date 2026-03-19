@@ -819,6 +819,45 @@ class SSHManager:
         await self._run_remote(machine_id, f"git clone {git_url} {path}")
         logger.info(f"Clone complete: {path} on {machine_id}")
 
+    async def list_project_dirs(self, machine_id: str) -> list[str]:
+        """List directories under a machine's project_path.
+
+        Uses an existing SSH connection if available.  Falls back to
+        config.default_paths when no connection is open or the ls fails.
+        """
+        machine = self._get_machine(machine_id)
+        project_path = machine.project_path  # e.g. "~/Projects"
+
+        try:
+            if machine.localhost:
+                expanded = Path(project_path).expanduser()
+                if expanded.is_dir():
+                    return sorted(
+                        d.name
+                        for d in expanded.iterdir()
+                        if d.is_dir() and not d.name.startswith(".")
+                    )
+                return machine.default_paths
+
+            tunnel = self.tunnels.get(machine_id)
+            if not tunnel or not tunnel.conn or not tunnel.alive:
+                return machine.default_paths
+
+            result = await asyncio.wait_for(
+                tunnel.conn.run(
+                    f"ls -1 {project_path}/ 2>/dev/null"
+                ),
+                timeout=3.0,
+            )
+            stdout = (result.stdout or "").strip()
+            if stdout:
+                # Return bare directory names (user can type short names)
+                return sorted(stdout.splitlines())
+        except Exception:
+            logger.debug(f"Failed to list project dirs on {machine_id}, using defaults")
+
+        return machine.default_paths
+
     async def close_all(self) -> None:
         """Close all SSH tunnels and connections."""
         for machine_id, tunnel in list(self.tunnels.items()):

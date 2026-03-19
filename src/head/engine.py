@@ -303,6 +303,7 @@ class BotEngine:
 
         # Smart path resolution: single word → ~/Projects/word, git URL → clone
         path, git_url = resolve_session_path(raw_path, peer.project_path)
+        logger.info(f"Path resolved: {raw_path!r} → {path!r} (project_path={peer.project_path!r})")
 
         if not silent_init:
             if git_url:

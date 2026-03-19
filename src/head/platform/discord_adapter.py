@@ -787,8 +787,11 @@ class DiscordAdapter:
             if interaction.namespace and hasattr(interaction.namespace, "machine"):
                 machine_id = interaction.namespace.machine
             paths: list[str] = []
-            if machine_id and machine_id in self.config.machines:
-                paths = self.config.machines[machine_id].default_paths
+            if machine_id and machine_id in self.config.machines and self._engine:
+                try:
+                    paths = await self._engine.ssh.list_project_dirs(machine_id)
+                except Exception:
+                    paths = self.config.machines[machine_id].default_paths
             elif self.config.machines:
                 for mc in self.config.machines.values():
                     paths.extend(mc.default_paths)
@@ -881,10 +884,10 @@ class DiscordAdapter:
             machines = [mid for mid in self.config.machines if mid not in jump_hosts and current.lower() in mid.lower()]
             return [app_commands.Choice(name=m, value=m) for m in machines][:25]
 
-        # ------------------------------------------------------------------ /rm-session
-        @tree.command(name="rm-session", description="Destroy a specific session by name or ID")
+        # -------------------------------------------------------------- /remove-session
+        @tree.command(name="remove-session", description="Destroy a specific session by name or ID")
         @app_commands.describe(session="Session name or ID")
-        async def slash_rm_session(interaction: discord.Interaction, session: str) -> None:
+        async def slash_remove_session(interaction: discord.Interaction, session: str) -> None:
             await interaction.response.defer()
             channel_id = self._defer_and_register(interaction)
             if self._on_input:
@@ -893,8 +896,8 @@ class DiscordAdapter:
                 except Exception as e:
                     await self.send_message(channel_id, format_error(str(e)))
 
-        @slash_rm_session.autocomplete("session")
-        async def rm_session_autocomplete(
+        @slash_remove_session.autocomplete("session")
+        async def remove_session_autocomplete(
             interaction: discord.Interaction, current: str
         ) -> list[app_commands.Choice[str]]:
             router = self._engine.router if self._engine else None
