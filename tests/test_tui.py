@@ -9,13 +9,14 @@ import yaml
 
 from head.tui.app import CodecastApp, CODECAST_THEME
 from head.tui.screens import (
+    AddMachineScreen,
     DashboardScreen,
     SessionsScreen,
     SetupWizardScreen,
     StartHeadScreen,
     StartWebUIScreen,
 )
-from head.tui.widgets import StatusPanel, PeerTable
+from head.tui.widgets import StatusPanel, MachineTable
 
 
 def _get_static_text(widget) -> str:
@@ -77,7 +78,7 @@ async def test_wizard_menu_options(tmp_path):
         menu = app.screen.query_one("#wizard_menu")
         option_ids = [opt.id for opt in menu._options]
         assert "start_daemon" in option_ids
-        assert "add_peer" in option_ids
+        assert "add_machine" in option_ids
         assert "config_discord" in option_ids
         assert "config_telegram" in option_ids
         assert "skip" in option_ids
@@ -94,10 +95,13 @@ async def test_dashboard_keybindings(tmp_path):
         assert isinstance(app.screen, DashboardScreen)
         keys = {b[0] if isinstance(b, tuple) else b.key for b in app.screen.BINDINGS}
         assert "d" in keys
-        assert "h" in keys
+        assert "H" in keys
         assert "w" in keys
         assert "a" in keys
         assert "s" in keys
+        assert "x" in keys
+        assert "j" in keys
+        assert "k" in keys
         assert "q" in keys
 
 
@@ -118,8 +122,8 @@ async def test_status_panel_renders(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_peer_table_shows_peers(tmp_path):
-    """PeerTable should show peers from config."""
+async def test_machine_table_shows_machines(tmp_path):
+    """MachineTable should show machines from config."""
     config_path = tmp_path / "config.yaml"
     cfg = {
         "default_mode": "auto",
@@ -132,25 +136,25 @@ async def test_peer_table_shows_peers(tmp_path):
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        table = app.screen.query_one("#peer_table", PeerTable)
+        table = app.screen.query_one("#machine_table", MachineTable)
         assert table.row_count == 2
 
 
 @pytest.mark.asyncio
-async def test_peer_table_empty_config(tmp_path):
-    """PeerTable should handle config with no peers."""
+async def test_machine_table_empty_config(tmp_path):
+    """MachineTable should handle config with no machines."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump({"default_mode": "auto"}))
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        table = app.screen.query_one("#peer_table", PeerTable)
+        table = app.screen.query_one("#machine_table", MachineTable)
         assert table.row_count == 0
 
 
 @pytest.mark.asyncio
-async def test_peer_table_title_shows_count(tmp_path):
-    """Peer table title should show the peer count."""
+async def test_machine_table_title_shows_count(tmp_path):
+    """Machine table title should show the machine count."""
     config_path = tmp_path / "config.yaml"
     cfg = {
         "default_mode": "auto",
@@ -164,7 +168,7 @@ async def test_peer_table_title_shows_count(tmp_path):
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        title = app.screen.query_one("#peer_table_title")
+        title = app.screen.query_one("#machine_table_title")
         text = _get_static_text(title)
         assert "3 configured" in text
 
@@ -194,14 +198,14 @@ async def test_version_displayed(tmp_path):
 
 @pytest.mark.asyncio
 async def test_dashboard_has_status_panel_container(tmp_path):
-    """Dashboard should have bordered status and peer containers."""
+    """Dashboard should have bordered status and machine containers."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump({"default_mode": "auto"}))
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.screen.query_one("#status_panel_container") is not None
-        assert app.screen.query_one("#peer_table_container") is not None
+        assert app.screen.query_one("#machine_table_container") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -471,15 +475,15 @@ async def test_sessions_screen_with_sessions(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dashboard_h_key_opens_head_screen(tmp_path):
-    """Pressing 'h' on dashboard should open StartHeadScreen."""
+async def test_dashboard_H_key_opens_head_screen(tmp_path):
+    """Pressing 'H' (shift-h) on dashboard should open StartHeadScreen."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump({"default_mode": "auto"}))
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
         assert isinstance(app.screen, DashboardScreen)
-        await pilot.press("h")
+        await pilot.press("H")
         await pilot.pause()
         assert isinstance(app.screen, StartHeadScreen)
 
@@ -510,3 +514,169 @@ async def test_dashboard_s_key_opens_sessions_screen(tmp_path):
         await pilot.press("s")
         await pilot.pause()
         assert isinstance(app.screen, SessionsScreen)
+
+
+# ---------------------------------------------------------------------------
+# AddMachineScreen tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_add_machine_screen_shows_method_choice(tmp_path):
+    """AddMachineScreen should show Manual/SSH import options."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(AddMachineScreen(str(config_path)))
+        await pilot.pause()
+        assert isinstance(app.screen, AddMachineScreen)
+        method_list = app.screen.query_one("#add_machine_method")
+        option_ids = [opt.id for opt in method_list._options]
+        assert "manual" in option_ids
+        assert "ssh_import" in option_ids
+
+
+@pytest.mark.asyncio
+async def test_add_machine_screen_title(tmp_path):
+    """AddMachineScreen should display 'Add a machine' title."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(AddMachineScreen(str(config_path)))
+        await pilot.pause()
+        title = app.screen.query_one("#add_machine_title")
+        text = _get_static_text(title)
+        assert "Add a machine" in text
+
+
+# ---------------------------------------------------------------------------
+# Remove machine tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_remove_machine_action(tmp_path):
+    """action_remove_machine should remove a machine from config."""
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {
+            "server1": {"transport": "ssh", "ssh_host": "10.0.0.1"},
+            "server2": {"transport": "ssh", "ssh_host": "10.0.0.2"},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+        table = app.screen.query_one("#machine_table", MachineTable)
+        assert table.row_count == 2
+        # The x key triggers remove_machine (needs a selected row)
+        # Just verify the binding exists
+        keys = {b[0] if isinstance(b, tuple) else b.key for b in app.screen.BINDINGS}
+        assert "x" in keys
+
+
+# ---------------------------------------------------------------------------
+# Vim navigation tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vim_navigation_bindings_on_dashboard(tmp_path):
+    """Dashboard should have j/k/l vim navigation bindings."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+        keys = {b[0] if isinstance(b, tuple) else b.key for b in app.screen.BINDINGS}
+        assert "j" in keys
+        assert "k" in keys
+        assert "l" in keys
+
+
+@pytest.mark.asyncio
+async def test_vim_navigation_bindings_on_sessions(tmp_path):
+    """SessionsScreen should have j/k/h/l vim navigation bindings."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(SessionsScreen(str(config_path)))
+        await pilot.pause()
+        assert isinstance(app.screen, SessionsScreen)
+        keys = {b[0] if isinstance(b, tuple) else b.key for b in app.screen.BINDINGS}
+        assert "j" in keys
+        assert "k" in keys
+        assert "h" in keys
+        assert "l" in keys
+
+
+# ---------------------------------------------------------------------------
+# Session drill-down tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sessions_screen_filter_machine(tmp_path):
+    """SessionsScreen should support filter_machine parameter."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = SessionsScreen(str(config_path), filter_machine="server1")
+        screen._load_sessions = lambda: []
+        app.push_screen(screen)
+        await pilot.pause()
+        assert app.screen._filter_machine == "server1"
+        title = app.screen.query_one("#sessions_title")
+        text = _get_static_text(title)
+        assert "server1" in text
+
+
+@pytest.mark.asyncio
+async def test_sessions_screen_h_goes_back_from_filter(tmp_path):
+    """Pressing 'h' on filtered sessions should clear filter, not pop screen."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = SessionsScreen(str(config_path), filter_machine="server1")
+        screen._load_sessions = lambda: []
+        app.push_screen(screen)
+        await pilot.pause()
+        assert app.screen._filter_machine == "server1"
+        await pilot.press("h")
+        await pilot.pause()
+        # Should still be on SessionsScreen but filter cleared
+        assert isinstance(app.screen, SessionsScreen)
+        assert app.screen._filter_machine is None
+
+
+@pytest.mark.asyncio
+async def test_sessions_screen_h_pops_when_no_filter(tmp_path):
+    """Pressing 'h' on unfiltered sessions should pop back to dashboard."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = SessionsScreen(str(config_path))
+        screen._load_sessions = lambda: []
+        app.push_screen(screen)
+        await pilot.pause()
+        assert isinstance(app.screen, SessionsScreen)
+        assert app.screen._filter_machine is None
+        await pilot.press("h")
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)

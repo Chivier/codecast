@@ -15,7 +15,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from .widgets import PeerTable, StatusPanel
+from .widgets import MachineTable, StatusPanel
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ def _load_config(config_path: str):
 
 _WIZARD_OPTIONS = [
     Option("Start local daemon", id="start_daemon"),
-    Option("Add a remote peer", id="add_peer"),
+    Option("Add a remote machine", id="add_machine"),
     Option("Configure Discord bot", id="config_discord"),
     Option("Configure Telegram bot", id="config_telegram"),
     Option("Skip setup", id="skip"),
@@ -96,8 +96,8 @@ class SetupWizardScreen(Screen):
             self.app.exit()
         elif option_id == "start_daemon":
             self.app.push_screen(StartDaemonScreen(self.config_path))
-        elif option_id == "add_peer":
-            self.app.push_screen(AddPeerScreen(self.config_path))
+        elif option_id == "add_machine":
+            self.app.push_screen(AddMachineScreen(self.config_path))
         elif option_id == "config_discord":
             self.app.push_screen(ConfigBotScreen(self.config_path, "discord"))
         elif option_id == "config_telegram":
@@ -117,10 +117,15 @@ class DashboardScreen(Screen):
 
     BINDINGS = [
         ("d", "toggle_daemon", "Daemon"),
-        ("h", "start_head", "Head"),
+        ("H", "start_head", "Head"),
         ("w", "start_webui", "WebUI"),
-        ("a", "add_peer", "Add Peer"),
+        ("a", "add_machine", "Add Machine"),
         ("s", "sessions", "Sessions"),
+        ("x", "remove_machine", "Remove Machine"),
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+        ("l", "drill_machine", "Drill"),
+        ("enter", "drill_machine", "Drill"),
         ("question_mark", "show_help", "Help"),
         ("q", "quit_app", "Quit"),
     ]
@@ -134,21 +139,21 @@ class DashboardScreen(Screen):
         yield Header()
 
         cfg = _load_config(self.config_path)
-        peer_count = len(cfg.peers) if cfg else 0
+        machine_count = len(cfg.peers) if cfg else 0
 
         yield Vertical(
             Vertical(
-                Static(f"[bold]Status[/bold]", id="status_panel_title"),
+                Static("[bold]Status[/bold]", id="status_panel_title"),
                 StatusPanel(config_path=self.config_path, id="status"),
                 id="status_panel_container",
             ),
             Vertical(
                 Static(
-                    f"[bold]Peers ({peer_count} configured)[/bold]",
-                    id="peer_table_title",
+                    f"[bold]Machines ({machine_count} configured)[/bold]",
+                    id="machine_table_title",
                 ),
-                PeerTable(self.config_path, id="peer_table"),
-                id="peer_table_container",
+                MachineTable(self.config_path, id="machine_table"),
+                id="machine_table_container",
             ),
             id="dashboard_container",
         )
@@ -163,16 +168,70 @@ class DashboardScreen(Screen):
     def action_start_webui(self) -> None:
         self.app.push_screen(StartWebUIScreen(self.config_path))
 
-    def action_add_peer(self) -> None:
-        self.app.push_screen(AddPeerScreen(self.config_path))
+    def action_add_machine(self) -> None:
+        self.app.push_screen(AddMachineScreen(self.config_path))
 
     def action_sessions(self) -> None:
         self.app.push_screen(SessionsScreen(self.config_path))
 
+    def action_remove_machine(self) -> None:
+        try:
+            table = self.query_one("#machine_table", MachineTable)
+        except Exception:
+            return
+        name = table.get_selected_machine_name()
+        if not name:
+            self.notify("No machine selected.", severity="warning")
+            return
+        try:
+            from head.config import load_config_v2, remove_machine_from_config
+
+            cfg = load_config_v2(self.config_path)
+            remove_machine_from_config(cfg, name)
+            table.refresh_machines()
+            title = self.query_one("#machine_table_title", Static)
+            title.update(f"[bold]Machines ({table.machine_count} configured)[/bold]")
+            self.notify(f"Removed machine: {name}")
+        except Exception as exc:
+            self.notify(f"Failed to remove machine: {exc}", severity="error")
+
+    def action_cursor_down(self) -> None:
+        try:
+            table = self.query_one("#machine_table", MachineTable)
+            table.action_cursor_down()
+        except Exception:
+            pass
+
+    def action_cursor_up(self) -> None:
+        try:
+            table = self.query_one("#machine_table", MachineTable)
+            table.action_cursor_up()
+        except Exception:
+            pass
+
+    def action_drill_machine(self) -> None:
+        """Open sessions screen filtered to the selected machine."""
+        try:
+            table = self.query_one("#machine_table", MachineTable)
+        except Exception:
+            return
+        name = table.get_selected_machine_name()
+        if name:
+            self.app.push_screen(SessionsScreen(self.config_path, filter_machine=name))
+        else:
+            self.app.push_screen(SessionsScreen(self.config_path))
+
     def on_screen_resume(self) -> None:
-        """Refresh status panel when returning from a sub-screen."""
+        """Refresh status panel and machine table when returning from a sub-screen."""
         try:
             self.query_one("#status", StatusPanel).refresh_status()
+        except Exception:
+            pass
+        try:
+            table = self.query_one("#machine_table", MachineTable)
+            table.refresh_machines()
+            title = self.query_one("#machine_table_title", Static)
+            title.update(f"[bold]Machines ({table.machine_count} configured)[/bold]")
         except Exception:
             pass
 
@@ -200,24 +259,28 @@ class HelpScreen(Screen):
             "\n"
             "[bold]Dashboard shortcuts:[/bold]\n"
             "  [cyan]d[/cyan]  Start / stop the local daemon\n"
-            "  [cyan]h[/cyan]  Start / stop the head node (Discord/Telegram/Lark bots)\n"
+            "  [cyan]H[/cyan]  Start / stop the head node (Discord/Telegram/Lark bots)\n"
             "  [cyan]w[/cyan]  Start / stop the web UI\n"
-            "  [cyan]a[/cyan]  Add a new peer (remote machine)\n"
+            "  [cyan]a[/cyan]  Add a new machine\n"
+            "  [cyan]x[/cyan]  Remove selected machine\n"
             "  [cyan]s[/cyan]  View active sessions\n"
             "  [cyan]?[/cyan]  Show this help screen\n"
             "  [cyan]q[/cyan]  Quit\n"
             "\n"
-            "[bold]Navigation:[/bold]\n"
-            "  [cyan]Esc[/cyan]      Go back / close current screen\n"
-            "  [cyan]Enter[/cyan]    Select highlighted option\n"
-            "  [cyan]Up/Down[/cyan]  Navigate options\n"
+            "[bold]Vim navigation:[/bold]\n"
+            "  [cyan]j[/cyan]      Move cursor down\n"
+            "  [cyan]k[/cyan]      Move cursor up\n"
+            "  [cyan]l[/cyan]      Drill into machine sessions\n"
+            "  [cyan]h[/cyan]      Go back (in sessions view)\n"
+            "  [cyan]Enter[/cyan]  Select / drill in\n"
+            "  [cyan]Esc[/cyan]    Go back / close current screen\n"
             "\n"
             "[bold]CLI equivalents:[/bold]\n"
             "  codecast start       Start the daemon\n"
             "  codecast stop        Stop the daemon\n"
             "  codecast head start  Start the head node\n"
             "  codecast status      Show component status\n"
-            "  codecast peers       List configured peers\n"
+            "  codecast peers       List configured machines\n"
             "  codecast sessions    List active sessions\n"
         )
         yield Vertical(
@@ -273,7 +336,7 @@ class StartHeadScreen(Screen):
             summary_lines.append("Head node is [dim]not running[/dim].")
         summary_lines.append(f"Config:  {self.config_path}")
         summary_lines.append(f"Bots:    {', '.join(bots_configured) if bots_configured else '[dim]none[/dim]'}")
-        summary_lines.append(f"Peers:   {len(peers)} configured")
+        summary_lines.append(f"Machines: {len(peers)} configured")
 
         options: list[Option] = []
         if head_running:
@@ -443,12 +506,12 @@ class StartDaemonScreen(Screen):
 
 
 # ---------------------------------------------------------------------------
-# Add Peer
+# Add Machine
 # ---------------------------------------------------------------------------
 
 
-class AddPeerScreen(Screen):
-    """Screen for adding a new remote peer."""
+class AddMachineScreen(Screen):
+    """Screen for adding a new machine (manual or SSH import)."""
 
     BINDINGS = [("escape", "go_back", "Back")]
 
@@ -456,50 +519,152 @@ class AddPeerScreen(Screen):
         super().__init__()
         self.config_path = config_path
         self._step = 0
-        self._peer_name = ""
+        self._machine_name = ""
         self._transport = ""
+        self._mode = ""  # "manual" or "ssh_import"
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Vertical(
-            Static("Add a remote peer\n", id="add_peer_title"),
-            Static("Enter peer name:", id="add_peer_prompt"),
-            Input(placeholder="e.g. my-server", id="peer_input"),
-            id="add_peer_container",
+            Static("Add a machine\n", id="add_machine_title"),
+            Static("Choose method:", id="add_machine_prompt"),
+            OptionList(
+                Option("Manual entry", id="manual"),
+                Option("Import from SSH config", id="ssh_import"),
+                id="add_machine_method",
+            ),
+            id="add_machine_container",
         )
         yield Footer()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option.id
+        if option_id == "manual":
+            self._mode = "manual"
+            self._step = 1
+            self._switch_to_manual_input()
+        elif option_id == "ssh_import":
+            self._mode = "ssh_import"
+            self._show_ssh_hosts()
+        elif option_id and option_id.startswith("ssh_host:"):
+            self._import_ssh_host(option_id[len("ssh_host:") :])
+
+    def _switch_to_manual_input(self) -> None:
+        """Replace option list with manual input fields."""
+        prompt = self.query_one("#add_machine_prompt", Static)
+        prompt.update("Enter machine name:")
+        try:
+            method_list = self.query_one("#add_machine_method", OptionList)
+            method_list.remove()
+        except Exception:
+            pass
+        container = self.query_one("#add_machine_container", Vertical)
+        container.mount(Input(placeholder="e.g. my-server", id="machine_input"))
+
+    def _show_ssh_hosts(self) -> None:
+        """Show available SSH hosts from ~/.ssh/config."""
+        try:
+            from head.config import load_config_v2, parse_ssh_config
+
+            ssh_entries = parse_ssh_config()
+            cfg = load_config_v2(self.config_path) if Path(self.config_path).exists() else None
+            existing = set((cfg.peers or {}).keys()) if cfg else set()
+        except Exception:
+            ssh_entries = []
+            existing = set()
+
+        # Filter out already-configured machines
+        available = [e for e in ssh_entries if e.name not in existing]
+
+        prompt = self.query_one("#add_machine_prompt", Static)
+        method_list = self.query_one("#add_machine_method", OptionList)
+
+        if not available:
+            prompt.update("No new SSH hosts found in ~/.ssh/config.")
+            method_list.clear_options()
+            return
+
+        prompt.update(f"Select SSH host to import ({len(available)} available):")
+        method_list.clear_options()
+        for entry in available:
+            host_info = entry.hostname or entry.name
+            if entry.user:
+                host_info = f"{entry.user}@{host_info}"
+            method_list.add_option(Option(f"{entry.name} ({host_info})", id=f"ssh_host:{entry.name}"))
+
+    def _import_ssh_host(self, host_name: str) -> None:
+        """Import an SSH host from ssh config as a machine."""
+        from head.config import Config, PeerConfig, load_config_v2, parse_ssh_config, save_config_v2
+
+        ssh_entries = parse_ssh_config()
+        entry = next((e for e in ssh_entries if e.name == host_name), None)
+        if not entry:
+            self.notify(f"SSH host '{host_name}' not found.", severity="error")
+            self.app.pop_screen()
+            return
+
+        try:
+            cfg = load_config_v2(self.config_path)
+        except FileNotFoundError:
+            cfg = Config()
+
+        hostname = entry.hostname or entry.name
+        # Check if this is a localhost machine
+        try:
+            from head.config import _is_localhost
+
+            is_local = _is_localhost(hostname)
+        except Exception:
+            is_local = hostname in ("localhost", "127.0.0.1", "::1")
+
+        if is_local:
+            peer = PeerConfig(id=host_name, transport="local")
+        else:
+            peer = PeerConfig(
+                id=host_name,
+                transport="ssh",
+                ssh_host=hostname,
+                ssh_user=entry.user,
+                proxy_jump=entry.proxy_jump,
+            )
+
+        cfg.peers[host_name] = peer
+        Path(self.config_path).parent.mkdir(parents=True, exist_ok=True)
+        save_config_v2(cfg, self.config_path)
+        self.notify(f"Machine '{host_name}' imported from SSH config.")
+        self.app.pop_screen()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
         if not value:
             return
 
-        if self._step == 0:
-            self._peer_name = value
-            self._step = 1
-            prompt = self.query_one("#add_peer_prompt", Static)
+        if self._step == 1:
+            self._machine_name = value
+            self._step = 2
+            prompt = self.query_one("#add_machine_prompt", Static)
             prompt.update("Transport (http / ssh):")
-            inp = self.query_one("#peer_input", Input)
+            inp = self.query_one("#machine_input", Input)
             inp.value = ""
             inp.placeholder = "ssh"
-        elif self._step == 1:
+        elif self._step == 2:
             self._transport = value if value in ("http", "ssh") else "ssh"
-            self._step = 2
-            prompt = self.query_one("#add_peer_prompt", Static)
+            self._step = 3
+            prompt = self.query_one("#add_machine_prompt", Static)
             if self._transport == "http":
                 prompt.update("Address (e.g. https://host:9100):")
             else:
                 prompt.update("SSH host (e.g. user@host):")
-            inp = self.query_one("#peer_input", Input)
+            inp = self.query_one("#machine_input", Input)
             inp.value = ""
             inp.placeholder = ""
-        elif self._step == 2:
-            self._save_peer(value)
-            self.notify(f"Peer '{self._peer_name}' added.")
+        elif self._step == 3:
+            self._save_machine(value)
+            self.notify(f"Machine '{self._machine_name}' added.")
             self.app.pop_screen()
 
-    def _save_peer(self, address: str) -> None:
-        from head.config import PeerConfig, Config, load_config_v2, save_config_v2
+    def _save_machine(self, address: str) -> None:
+        from head.config import Config, PeerConfig, load_config_v2, save_config_v2
 
         try:
             cfg = load_config_v2(self.config_path)
@@ -507,7 +672,7 @@ class AddPeerScreen(Screen):
             cfg = Config()
 
         if self._transport == "http":
-            peer = PeerConfig(id=self._peer_name, transport="http", address=address)
+            peer = PeerConfig(id=self._machine_name, transport="http", address=address)
         else:
             parts = address.split("@", 1)
             if len(parts) == 2:
@@ -515,17 +680,21 @@ class AddPeerScreen(Screen):
             else:
                 user, host = None, parts[0]
             peer = PeerConfig(
-                id=self._peer_name,
+                id=self._machine_name,
                 transport="ssh",
                 ssh_host=host,
                 ssh_user=user,
             )
-        cfg.peers[self._peer_name] = peer
+        cfg.peers[self._machine_name] = peer
         Path(self.config_path).parent.mkdir(parents=True, exist_ok=True)
         save_config_v2(cfg, self.config_path)
 
     def action_go_back(self) -> None:
         self.app.pop_screen()
+
+
+# Keep backward-compatible alias
+AddPeerScreen = AddMachineScreen
 
 
 # ---------------------------------------------------------------------------
@@ -597,17 +766,24 @@ class SessionsScreen(Screen):
 
     BINDINGS = [
         ("escape", "go_back", "Back"),
+        ("h", "go_back", "Back"),
         ("t", "toggle_sort", "Toggle sort"),
         ("r", "remove_session", "Remove"),
         ("delete", "remove_session", "Remove"),
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+        ("l", "drill_or_enter", "Drill"),
+        ("enter", "drill_or_enter", "Drill"),
     ]
 
-    def __init__(self, config_path: str) -> None:
+    def __init__(self, config_path: str, filter_machine: str | None = None) -> None:
         super().__init__()
         self.config_path = config_path
         self._sort_descending = True  # newest first by default
         self._sessions: list = []
         self._row_session_map: dict[int, object] = {}  # row index -> Session
+        self._row_machine_map: dict[int, str] = {}  # row index -> machine_id (header rows)
+        self._filter_machine: str | None = filter_machine
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -629,9 +805,17 @@ class SessionsScreen(Screen):
     def _populate_sessions(self, table: DataTable) -> None:
         table.clear()
         self._row_session_map.clear()
+        self._row_machine_map.clear()
         info = self.query_one("#sessions_info", Static)
+        title = self.query_one("#sessions_title", Static)
 
         sessions = self._sessions
+        if self._filter_machine:
+            sessions = [s for s in sessions if s.machine_id == self._filter_machine]
+            title.update(f"[bold]Sessions — {self._filter_machine}[/bold] [dim](h=back)[/dim]\n")
+        else:
+            title.update("[bold]Sessions[/bold]\n")
+
         if not sessions:
             info.update("[dim]No sessions found.[/dim]")
             return
@@ -652,22 +836,25 @@ class SessionsScreen(Screen):
 
         row_idx = 0
         for machine_id, machine_sessions in grouped.items():
-            # Machine header row
-            table.add_row(
-                f"[bold cyan]▸ {machine_id}[/bold cyan]",
-                "",
-                "",
-                "",
-                "",
-                key=f"header_{machine_id}",
-            )
-            row_idx += 1
+            if not self._filter_machine:
+                # Machine header row (only in all-machines view)
+                table.add_row(
+                    f"[bold cyan]▸ {machine_id}[/bold cyan]",
+                    "",
+                    "",
+                    "",
+                    "",
+                    key=f"header_{machine_id}",
+                )
+                self._row_machine_map[row_idx] = machine_id
+                row_idx += 1
 
             for s in machine_sessions:
                 created = s.created_at[:16].replace("T", " ") if s.created_at else ""
                 path_display = s.path if len(s.path) <= 30 else "..." + s.path[-27:]
+                indent = "  " if not self._filter_machine else ""
                 table.add_row(
-                    f"  {s.name or s.daemon_session_id[:8]}",
+                    f"{indent}{s.name or s.daemon_session_id[:8]}",
                     path_display,
                     s.mode,
                     s.status,
@@ -678,7 +865,8 @@ class SessionsScreen(Screen):
                 row_idx += 1
 
         sort_label = "newest first" if self._sort_descending else "oldest first"
-        info.update(f"[dim]{len(sessions)} session(s) | Sort: {sort_label} (t) | Remove (r/del)[/dim]")
+        filter_info = f" | Machine: {self._filter_machine}" if self._filter_machine else ""
+        info.update(f"[dim]{len(sessions)} session(s) | Sort: {sort_label} (t) | Remove (r/del){filter_info}[/dim]")
 
     def _load_sessions(self):
         """Load sessions from the SessionRouter SQLite database."""
@@ -738,8 +926,41 @@ class SessionsScreen(Screen):
         else:
             self.notify("Cannot find session database.", severity="error")
 
+    def action_cursor_down(self) -> None:
+        try:
+            table = self.query_one("#sessions_table", DataTable)
+            table.action_cursor_down()
+        except Exception:
+            pass
+
+    def action_cursor_up(self) -> None:
+        try:
+            table = self.query_one("#sessions_table", DataTable)
+            table.action_cursor_up()
+        except Exception:
+            pass
+
+    def action_drill_or_enter(self) -> None:
+        """Drill into a machine's sessions when on a header row."""
+        if self._filter_machine:
+            return
+        table = self.query_one("#sessions_table", DataTable)
+        if table.row_count == 0:
+            return
+        cursor_row = table.cursor_row
+        machine_id = self._row_machine_map.get(cursor_row)
+        if machine_id:
+            self._filter_machine = machine_id
+            self._populate_sessions(table)
+
     def action_go_back(self) -> None:
-        self.app.pop_screen()
+        if self._filter_machine:
+            # Go back to all-machines view
+            self._filter_machine = None
+            table = self.query_one("#sessions_table", DataTable)
+            self._populate_sessions(table)
+        else:
+            self.app.pop_screen()
 
 
 # ---------------------------------------------------------------------------

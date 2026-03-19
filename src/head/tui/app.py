@@ -47,14 +47,14 @@ class CodecastApp(App):
     #status_panel_container > Static {
         color: $text;
     }
-    #peer_table_container {
+    #machine_table_container {
         border: solid $primary;
         padding: 1 2;
         margin: 1 0;
         height: auto;
         max-height: 20;
     }
-    #status_panel_title, #peer_table_title {
+    #status_panel_title, #machine_table_title {
         text-style: bold;
         margin-bottom: 1;
     }
