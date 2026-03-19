@@ -25,6 +25,9 @@ peers:
   #   # proxy_jump: gpu-1         # Optional: jump host
   #   daemon_port: 9100           # Port for daemon RPC (default: 9100)
   #   # node_path: /usr/bin/node  # Optional: path to node on remote
+  #   # project_path: ~/Projects  # Base dir for short-name path expansion (default: ~/Projects)
+  #   #   With this, `/start gpu-2 myapp` expands to ~/Projects/myapp
+  #   #   Git URLs like `https://github.com/user/repo` clone to ~/Projects/repo
   #   default_paths:
   #     - /home/your-user/project-a
 

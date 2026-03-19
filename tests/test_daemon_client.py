@@ -441,10 +441,10 @@ class TestGetSession:
         await s2.close()
 
 
-# ─── V2: extra_headers and base_url ───
+# ─── HTTP transport: extra_headers and base_url ───
 
 
-class TestDaemonClientV2:
+class TestDaemonClientHTTPTransport:
     def test_extra_headers_stored(self):
         client = DaemonClient(extra_headers={"Authorization": "Bearer ccast_test"})
         assert client._extra_headers["Authorization"] == "Bearer ccast_test"

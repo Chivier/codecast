@@ -795,6 +795,71 @@ class SSHManager:
         logger.info(f"Downloaded {machine_id}:{remote_path} to {local_path}")
         return local_path
 
+    async def _run_remote(self, machine_id: str, cmd: str) -> str:
+        """Run a command on a remote machine (or locally for localhost).
+
+        Returns stdout. Raises RuntimeError on non-zero exit.
+        """
+        machine = self._get_machine(machine_id)
+
+        if machine.localhost:
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await proc.communicate()
+            stdout = (stdout_bytes or b"").decode()
+            if proc.returncode != 0:
+                stderr = (stderr_bytes or b"").decode()
+                raise RuntimeError(f"Command failed (rc={proc.returncode}): {stderr.strip()}")
+            return stdout
+
+        # Remote: reuse tunnel connection
+        if machine_id in self.tunnels and self.tunnels[machine_id].alive:
+            conn = self.tunnels[machine_id].conn
+        else:
+            conn = await self._connect_ssh(machine)
+
+        result = await conn.run(cmd, check=True)
+        return result.stdout or ""
+
+    async def ensure_dir(self, machine_id: str, path: str) -> None:
+        """Ensure a directory exists on the remote machine (mkdir -p)."""
+        try:
+            await self._run_remote(machine_id, f"mkdir -p {path}")
+        except Exception as exc:
+            logger.warning(f"Failed to create directory {path} on {machine_id}: {exc}")
+
+    async def ensure_repo(self, machine_id: str, path: str, git_url: str) -> None:
+        """Clone a git repo on the remote machine if it doesn't already exist.
+
+        Creates the parent directory if needed.
+        """
+        # Check if directory already exists
+        machine = self._get_machine(machine_id)
+        if machine.localhost:
+            if Path(path).expanduser().exists():
+                logger.info(f"Directory {path} already exists locally, skipping clone")
+                return
+        else:
+            if machine_id in self.tunnels and self.tunnels[machine_id].alive:
+                conn = self.tunnels[machine_id].conn
+            else:
+                conn = await self._connect_ssh(machine)
+            check = await conn.run(f"test -d {path} && echo 'exists' || echo 'missing'")
+            if "exists" in (check.stdout or ""):
+                logger.info(f"Directory {path} already exists on {machine_id}, skipping clone")
+                return
+
+        # Get parent directory for mkdir -p
+        parent = str(Path(path).parent)
+        await self._run_remote(machine_id, f"mkdir -p {parent}")
+
+        logger.info(f"Cloning {git_url} to {path} on {machine_id}")
+        await self._run_remote(machine_id, f"git clone {git_url} {path}")
+        logger.info(f"Clone complete: {path} on {machine_id}")
+
     async def close_all(self) -> None:
         """Close all SSH tunnels and connections."""
         for machine_id, tunnel in list(self.tunnels.items()):

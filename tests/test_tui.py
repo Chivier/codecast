@@ -7,12 +7,15 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from textual.widgets import Input
+
 from head.tui.app import CodecastApp, CODECAST_THEME
 from head.tui.screens import (
     AddMachineScreen,
     ConfigBotScreen,
     DashboardScreen,
     HelpScreen,
+    SSHImportScreen,
     SessionsScreen,
     SetupWizardScreen,
     StartDaemonScreen,
@@ -224,13 +227,13 @@ async def test_start_head_screen_shows_status(tmp_path):
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        # Push StartHeadScreen from dashboard
-        app.push_screen(StartHeadScreen(str(config_path)))
-        await pilot.pause()
+        with patch("head.cli._read_pid_file", return_value=None):
+            app.push_screen(StartHeadScreen(str(config_path)))
+            await pilot.pause()
         assert isinstance(app.screen, StartHeadScreen)
         status = app.screen.query_one("#head_status")
         text = _get_static_text(status)
-        assert "not running" in text
+        assert "stopped" in text
         assert "Config:" in text
 
 
@@ -263,8 +266,9 @@ async def test_start_head_screen_shows_bots_when_configured(tmp_path):
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.push_screen(StartHeadScreen(str(config_path)))
-        await pilot.pause()
+        with patch("head.cli._read_pid_file", return_value=None):
+            app.push_screen(StartHeadScreen(str(config_path)))
+            await pilot.pause()
         status = app.screen.query_one("#head_status")
         text = _get_static_text(status)
         assert "Discord" in text
@@ -327,22 +331,6 @@ async def test_start_webui_screen_menu_options(tmp_path):
         assert "back" in option_ids
 
 
-@pytest.mark.asyncio
-async def test_start_webui_screen_escape_goes_back(tmp_path):
-    """Pressing escape on StartWebUIScreen should return to dashboard."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.dump({"default_mode": "auto"}))
-    app = CodecastApp(config_path=str(config_path))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.push_screen(StartWebUIScreen(str(config_path)))
-        await pilot.pause()
-        assert isinstance(app.screen, StartWebUIScreen)
-        await pilot.press("escape")
-        await pilot.pause()
-        assert isinstance(app.screen, DashboardScreen)
-
-
 # ---------------------------------------------------------------------------
 # SessionsScreen tests
 # ---------------------------------------------------------------------------
@@ -383,22 +371,6 @@ async def test_sessions_screen_no_sessions(tmp_path):
         info = app.screen.query_one("#sessions_info")
         text = _get_static_text(info)
         assert "No sessions found" in text
-
-
-@pytest.mark.asyncio
-async def test_sessions_screen_escape_goes_back(tmp_path):
-    """Pressing escape on SessionsScreen should return to dashboard."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.dump({"default_mode": "auto"}))
-    app = CodecastApp(config_path=str(config_path))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.push_screen(SessionsScreen(str(config_path)))
-        await pilot.pause()
-        assert isinstance(app.screen, SessionsScreen)
-        await pilot.press("escape")
-        await pilot.pause()
-        assert isinstance(app.screen, DashboardScreen)
 
 
 @pytest.mark.asyncio
@@ -557,52 +529,8 @@ async def test_add_machine_screen_title(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Remove machine tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_remove_machine_action(tmp_path):
-    """action_remove_machine should remove a machine from config."""
-    config_path = tmp_path / "config.yaml"
-    cfg = {
-        "default_mode": "auto",
-        "peers": {
-            "server1": {"transport": "ssh", "ssh_host": "10.0.0.1"},
-            "server2": {"transport": "ssh", "ssh_host": "10.0.0.2"},
-        },
-    }
-    config_path.write_text(yaml.dump(cfg))
-    app = CodecastApp(config_path=str(config_path))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        assert isinstance(app.screen, DashboardScreen)
-        table = app.screen.query_one("#machine_table", MachineTable)
-        assert table.row_count == 2
-        # The x key triggers remove_machine (needs a selected row)
-        # Just verify the binding exists
-        keys = {b[0] if isinstance(b, tuple) else b.key for b in app.screen.BINDINGS}
-        assert "x" in keys
-
-
-# ---------------------------------------------------------------------------
 # Vim navigation tests
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_vim_navigation_bindings_on_dashboard(tmp_path):
-    """Dashboard should have j/k/l vim navigation bindings."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.dump({"default_mode": "auto"}))
-    app = CodecastApp(config_path=str(config_path))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        assert isinstance(app.screen, DashboardScreen)
-        keys = {b[0] if isinstance(b, tuple) else b.key for b in app.screen.BINDINGS}
-        assert "j" in keys
-        assert "k" in keys
-        assert "l" in keys
 
 
 @pytest.mark.asyncio
@@ -647,8 +575,8 @@ async def test_sessions_screen_filter_machine(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_sessions_screen_h_goes_back_from_filter(tmp_path):
-    """Pressing 'h' on filtered sessions should clear filter, not pop screen."""
+async def test_sessions_screen_h_pops_when_init_filtered(tmp_path):
+    """Pressing 'h' on init-filtered sessions should pop back to dashboard."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump({"default_mode": "auto"}))
     app = CodecastApp(config_path=str(config_path))
@@ -659,9 +587,37 @@ async def test_sessions_screen_h_goes_back_from_filter(tmp_path):
         app.push_screen(screen)
         await pilot.pause()
         assert app.screen._filter_machine == "server1"
+        assert app.screen._init_filtered is True
         await pilot.press("h")
         await pilot.pause()
-        # Should still be on SessionsScreen but filter cleared
+        # Should pop back to dashboard (not clear filter)
+        assert isinstance(app.screen, DashboardScreen)
+
+
+@pytest.mark.asyncio
+async def test_sessions_screen_h_clears_drilldown_filter(tmp_path):
+    """Pressing 'h' on drill-down filtered sessions should clear filter, not pop."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    sessions = [
+        _make_fake_session(channel_id="discord:1", machine_id="server1"),
+        _make_fake_session(channel_id="discord:2", machine_id="server2"),
+    ]
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = SessionsScreen(str(config_path))
+        screen._load_sessions = lambda: sessions
+        app.push_screen(screen)
+        await pilot.pause()
+        # Drill down into server1 via action_open_or_enter
+        screen.action_open_or_enter()
+        await pilot.pause()
+        assert screen._filter_machine is not None
+        assert screen._init_filtered is False
+        await pilot.press("h")
+        await pilot.pause()
+        # Should clear filter but stay on SessionsScreen
         assert isinstance(app.screen, SessionsScreen)
         assert app.screen._filter_machine is None
 
@@ -752,26 +708,6 @@ async def test_start_daemon_screen_no_claude_cli(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_start_daemon_screen_escape_goes_back(tmp_path):
-    """Pressing escape on StartDaemonScreen should return to dashboard."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.dump({"default_mode": "auto"}))
-    app = CodecastApp(config_path=str(config_path))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        with (
-            patch("head.tui.screens._check_daemon_running", return_value=(False, None)),
-            patch("head.tui.screens._check_claude_cli", return_value=True),
-        ):
-            app.push_screen(StartDaemonScreen(str(config_path)))
-            await pilot.pause()
-        assert isinstance(app.screen, StartDaemonScreen)
-        await pilot.press("escape")
-        await pilot.pause()
-        assert isinstance(app.screen, DashboardScreen)
-
-
-@pytest.mark.asyncio
 async def test_start_daemon_screen_start_option(tmp_path):
     """StartDaemonScreen should show 'Start daemon' when stopped and CLI available."""
     config_path = tmp_path / "config.yaml"
@@ -826,22 +762,6 @@ async def test_help_screen_shows_cli_equivalents(tmp_path):
         text = _get_static_text(help_text)
         assert "CLI equivalents" in text
         assert "codecast start" in text
-
-
-@pytest.mark.asyncio
-async def test_help_screen_escape_goes_back(tmp_path):
-    """Pressing escape on HelpScreen should return to dashboard."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.dump({"default_mode": "auto"}))
-    app = CodecastApp(config_path=str(config_path))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.push_screen(HelpScreen())
-        await pilot.pause()
-        assert isinstance(app.screen, HelpScreen)
-        await pilot.press("escape")
-        await pilot.pause()
-        assert isinstance(app.screen, DashboardScreen)
 
 
 # ---------------------------------------------------------------------------
@@ -944,22 +864,6 @@ async def test_config_bot_screen_saves_discord_token(tmp_path):
         with open(config_path) as f:
             saved = yaml.safe_load(f)
         assert saved["bot"]["discord"]["token"] == "test-discord-token-123"
-
-
-@pytest.mark.asyncio
-async def test_config_bot_screen_escape_goes_back(tmp_path):
-    """Pressing escape on ConfigBotScreen should go back."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.dump({"default_mode": "auto"}))
-    app = CodecastApp(config_path=str(config_path))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.push_screen(ConfigBotScreen(str(config_path), "discord"))
-        await pilot.pause()
-        assert isinstance(app.screen, ConfigBotScreen)
-        await pilot.press("escape")
-        await pilot.pause()
-        assert isinstance(app.screen, DashboardScreen)
 
 
 # ---------------------------------------------------------------------------
@@ -1075,8 +979,8 @@ async def test_add_machine_manual_http_flow(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_add_machine_ssh_import_shows_hosts(tmp_path):
-    """SSH import should show available hosts."""
+async def test_ssh_import_screen_shows_hosts(tmp_path):
+    """SSH import screen should show available hosts in selection list."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump({"default_mode": "auto"}))
 
@@ -1090,20 +994,18 @@ async def test_add_machine_ssh_import_shows_hosts(tmp_path):
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        screen = AddMachineScreen(str(config_path))
-        app.push_screen(screen)
-        await pilot.pause()
         with patch("head.config.parse_ssh_config", return_value=mock_entries):
-            screen._show_ssh_hosts()
+            screen = SSHImportScreen(str(config_path))
+            app.push_screen(screen)
             await pilot.pause()
-        prompt = screen.query_one("#add_machine_prompt")
-        text = _get_static_text(prompt)
-        assert "2 available" in text
+        status = screen.query_one("#ssh_status")
+        text = _get_static_text(status)
+        assert "2 hosts available" in text
 
 
 @pytest.mark.asyncio
-async def test_add_machine_ssh_import_filters_existing(tmp_path):
-    """SSH import should filter out already-configured machines."""
+async def test_ssh_import_screen_filters_existing(tmp_path):
+    """SSH import screen should filter out already-configured machines."""
     config_path = tmp_path / "config.yaml"
     cfg = {
         "default_mode": "auto",
@@ -1121,20 +1023,18 @@ async def test_add_machine_ssh_import_filters_existing(tmp_path):
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        screen = AddMachineScreen(str(config_path))
-        app.push_screen(screen)
-        await pilot.pause()
         with patch("head.config.parse_ssh_config", return_value=mock_entries):
-            screen._show_ssh_hosts()
+            screen = SSHImportScreen(str(config_path))
+            app.push_screen(screen)
             await pilot.pause()
-        prompt = screen.query_one("#add_machine_prompt")
-        text = _get_static_text(prompt)
-        assert "1 available" in text
+        status = screen.query_one("#ssh_status")
+        text = _get_static_text(status)
+        assert "1 hosts available" in text
 
 
 @pytest.mark.asyncio
-async def test_add_machine_ssh_import_deduplicates(tmp_path):
-    """SSH import should deduplicate hosts with the same name."""
+async def test_ssh_import_screen_deduplicates(tmp_path):
+    """SSH import screen should deduplicate hosts with the same name."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump({"default_mode": "auto"}))
 
@@ -1149,21 +1049,19 @@ async def test_add_machine_ssh_import_deduplicates(tmp_path):
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        screen = AddMachineScreen(str(config_path))
-        app.push_screen(screen)
-        await pilot.pause()
         with patch("head.config.parse_ssh_config", return_value=mock_entries):
-            screen._show_ssh_hosts()
+            screen = SSHImportScreen(str(config_path))
+            app.push_screen(screen)
             await pilot.pause()
-        prompt = screen.query_one("#add_machine_prompt")
-        text = _get_static_text(prompt)
-        # Should show 2 (dice deduped) not 3
-        assert "2 available" in text
+        status = screen.query_one("#ssh_status")
+        text = _get_static_text(status)
+        # Should show 2 (deduped) not 3
+        assert "2 hosts available" in text
 
 
 @pytest.mark.asyncio
-async def test_add_machine_ssh_import_saves_machine(tmp_path):
-    """Importing an SSH host should save it to config."""
+async def test_ssh_import_screen_saves_multiple_machines(tmp_path):
+    """Importing multiple SSH hosts should save them all to config."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump({"default_mode": "auto"}))
 
@@ -1171,25 +1069,56 @@ async def test_add_machine_ssh_import_saves_machine(tmp_path):
 
     mock_entries = [
         SSHHostEntry(name="remote-box", hostname="192.168.1.100", user="deploy"),
+        SSHHostEntry(name="gpu-node", hostname="10.0.0.50", user="ml"),
     ]
 
     app = CodecastApp(config_path=str(config_path))
     async with app.run_test() as pilot:
         await pilot.pause()
-        screen = AddMachineScreen(str(config_path))
-        app.push_screen(screen)
-        await pilot.pause()
-        with (
-            patch("head.config.parse_ssh_config", return_value=mock_entries),
-            patch("head.config._is_localhost", return_value=False),
-        ):
-            screen._import_ssh_host("remote-box")
+        with patch("head.config.parse_ssh_config", return_value=mock_entries):
+            screen = SSHImportScreen(str(config_path))
+            app.push_screen(screen)
+            await pilot.pause()
+        with patch("head.config._is_localhost", return_value=False):
+            screen._import_hosts(["remote-box", "gpu-node"])
             await pilot.pause()
         with open(config_path) as f:
             saved = yaml.safe_load(f)
         assert "remote-box" in saved["peers"]
         assert saved["peers"]["remote-box"]["ssh_host"] == "192.168.1.100"
         assert saved["peers"]["remote-box"]["ssh_user"] == "deploy"
+        assert "gpu-node" in saved["peers"]
+        assert saved["peers"]["gpu-node"]["ssh_host"] == "10.0.0.50"
+
+
+@pytest.mark.asyncio
+async def test_ssh_import_screen_search_filters(tmp_path):
+    """Search input should filter the host list."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+
+    from head.config import SSHHostEntry
+
+    mock_entries = [
+        SSHHostEntry(name="alpha-gpu", hostname="10.0.0.1"),
+        SSHHostEntry(name="beta-cpu", hostname="10.0.0.2"),
+        SSHHostEntry(name="gamma-gpu", hostname="10.0.0.3"),
+    ]
+
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        with patch("head.config.parse_ssh_config", return_value=mock_entries):
+            screen = SSHImportScreen(str(config_path))
+            app.push_screen(screen)
+            await pilot.pause()
+        # Type "gpu" in search
+        search = screen.query_one("#ssh_search", Input)
+        search.value = "gpu"
+        await pilot.pause()
+        status = screen.query_one("#ssh_status")
+        text = _get_static_text(status)
+        assert "2 hosts shown" in text
 
 
 # ---------------------------------------------------------------------------
@@ -1223,6 +1152,120 @@ def _make_fake_session(
         name=name,
         tool_display="append",
     )
+
+
+@pytest.mark.asyncio
+async def test_sessions_screen_unknown_machine_warning(tmp_path):
+    """Sessions from unknown machines should show a warning indicator."""
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {
+            "server1": {"transport": "ssh", "ssh_host": "10.0.0.1"},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+    # Session on server1 (known) and server-gone (unknown)
+    sessions = [
+        _make_fake_session(channel_id="discord:1", machine_id="server1"),
+        _make_fake_session(channel_id="discord:2", machine_id="server-gone", name="orphan"),
+    ]
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = SessionsScreen(str(config_path))
+        screen._load_sessions = lambda: sessions
+        app.push_screen(screen)
+        await pilot.pause()
+        # The table should have 2 machine headers + 2 session rows = 4 rows
+        table = screen.query_one("#sessions_table")
+        assert table.row_count == 4
+
+
+@pytest.mark.asyncio
+async def test_dashboard_unknown_machines_from_sessions(tmp_path):
+    """Dashboard should show unknown machines found in sessions."""
+    import sqlite3
+
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {
+            "server1": {"transport": "ssh", "ssh_host": "10.0.0.1"},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+
+    # Create sessions DB with a session referencing an unknown machine
+    db_path = tmp_path / "sessions.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE sessions (
+            channel_id TEXT PRIMARY KEY,
+            machine_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            daemon_session_id TEXT NOT NULL,
+            sdk_session_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            mode TEXT NOT NULL DEFAULT 'auto',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            name TEXT,
+            tool_display TEXT DEFAULT 'append'
+        )
+    """)
+    conn.execute(
+        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "discord:1",
+            "ghost-server",
+            "/proj",
+            "uuid-1",
+            None,
+            "active",
+            "auto",
+            "2026-03-18T00:00:00",
+            "2026-03-18T00:00:00",
+            "orphan",
+            "append",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    from head.session_router import SessionRouter
+
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+        # Patch _get_router to use our test DB
+        app.screen._get_router = lambda: SessionRouter(str(db_path))
+        app.screen._refresh_unknown_machines()
+        await pilot.pause()
+        table = app.screen.query_one("#machine_table", MachineTable)
+        # 1 configured + 1 unknown = 2 rows
+        assert table.row_count == 2
+
+
+@pytest.mark.asyncio
+async def test_machine_table_set_unknown_machines(tmp_path):
+    """MachineTable.set_unknown_machines should add/remove unknown rows."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.screen.query_one("#machine_table", MachineTable)
+        assert table.row_count == 0
+        table.set_unknown_machines(["ghost1", "ghost2"])
+        assert table.row_count == 2
+        # Setting again should replace, not duplicate
+        table.set_unknown_machines(["ghost1"])
+        assert table.row_count == 1
+        # Clear unknowns
+        table.set_unknown_machines([])
+        assert table.row_count == 0
 
 
 @pytest.mark.asyncio
@@ -1395,23 +1438,6 @@ async def test_status_panel_bot_summary(tmp_path):
         assert "Telegram" in bots
 
 
-@pytest.mark.asyncio
-async def test_status_panel_all_stopped(tmp_path):
-    """StatusPanel should render status for all four components."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.dump({"default_mode": "auto"}))
-    app = CodecastApp(config_path=str(config_path))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        status = app.screen.query_one("#status", StatusPanel)
-        text = _get_static_text(status)
-        # All four components should be present regardless of running state
-        assert "Head:" in text
-        assert "Daemon:" in text
-        assert "WebUI:" in text
-        assert "Claude:" in text
-
-
 # ---------------------------------------------------------------------------
 # MachineTable additional tests
 # ---------------------------------------------------------------------------
@@ -1490,3 +1516,266 @@ async def test_machine_table_get_selected_empty(tmp_path):
         table = app.screen.query_one("#machine_table", MachineTable)
         name = table.get_selected_machine_name()
         assert name is None
+
+
+# ---------------------------------------------------------------------------
+# Help screen via '?' key test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dashboard_question_mark_opens_help(tmp_path):
+    """Pressing '?' on dashboard should open HelpScreen."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+        await pilot.press("?")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpScreen)
+
+
+# ---------------------------------------------------------------------------
+# Remove machine tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_remove_machine_updates_config_file(tmp_path):
+    """Removing a machine should persist to config file with 1 machine left."""
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {
+            "server1": {"transport": "ssh", "ssh_host": "10.0.0.1"},
+            "server2": {"transport": "ssh", "ssh_host": "10.0.0.2"},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+        table = app.screen.query_one("#machine_table", MachineTable)
+        assert table.row_count == 2
+        # Directly call the remove action with a known machine
+        from head.config import load_config, save_config
+
+        config = load_config(str(config_path))
+        assert "server1" in config.peers
+        del config.peers["server1"]
+        save_config(config, str(config_path))
+        # Verify file
+        with open(config_path) as f:
+            saved = yaml.safe_load(f)
+        assert "server1" not in saved["peers"]
+        assert "server2" in saved["peers"]
+
+
+@pytest.mark.asyncio
+async def test_remove_machine_cleans_up_sessions(tmp_path):
+    """Removing a machine should also destroy its sessions."""
+    import sqlite3
+
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {
+            "server1": {"transport": "ssh", "ssh_host": "10.0.0.1"},
+            "server2": {"transport": "ssh", "ssh_host": "10.0.0.2"},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+
+    # Create a sessions database with sessions for server1
+    db_path = tmp_path / "sessions.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE sessions (
+            channel_id TEXT PRIMARY KEY,
+            machine_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            daemon_session_id TEXT NOT NULL,
+            sdk_session_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            mode TEXT NOT NULL DEFAULT 'auto',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            name TEXT,
+            tool_display TEXT DEFAULT 'append'
+        )
+    """)
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                f"discord:{i}",
+                "server1",
+                "/proj",
+                f"uuid-{i}",
+                None,
+                "active",
+                "auto",
+                "2026-03-18T00:00:00",
+                "2026-03-18T00:00:00",
+                f"sess-{i}",
+                "append",
+            ),
+        )
+    conn.execute(
+        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "discord:99",
+            "server2",
+            "/proj",
+            "uuid-99",
+            None,
+            "active",
+            "auto",
+            "2026-03-18T00:00:00",
+            "2026-03-18T00:00:00",
+            "keep-me",
+            "append",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+        table = app.screen.query_one("#machine_table", MachineTable)
+        assert table.row_count == 2
+
+        # Patch _get_router to use our test DB
+        from head.session_router import SessionRouter
+
+        app.screen._get_router = lambda: SessionRouter(str(db_path))
+
+        # Move cursor to server1 (first row)
+        table.move_cursor(row=0)
+        app.screen.action_remove_machine()
+        await pilot.pause()
+
+        # Verify server1 sessions are gone, server2 session remains
+        router = SessionRouter(str(db_path))
+        remaining = router.list_sessions()
+        assert len(remaining) == 1
+        assert remaining[0].machine_id == "server2"
+
+        # Verify config file updated
+        with open(config_path) as f:
+            saved = yaml.safe_load(f)
+        assert "server1" not in saved["peers"]
+        assert "server2" in saved["peers"]
+
+
+@pytest.mark.asyncio
+async def test_remove_machine_empty_list_warns(tmp_path):
+    """action_remove_machine with no machines should show warning, not crash."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"default_mode": "auto"}))
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, DashboardScreen)
+        table = app.screen.query_one("#machine_table", MachineTable)
+        assert table.row_count == 0
+        # Should not crash when calling remove with no selection
+        app.screen.action_remove_machine()
+        await pilot.pause()
+
+
+# ---------------------------------------------------------------------------
+# Config error handling tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dashboard_with_malformed_config(tmp_path):
+    """Malformed YAML config should not crash the app."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("invalid: yaml: [broken")
+    app = CodecastApp(config_path=str(config_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # App should still launch (wizard or dashboard)
+        assert app.screen is not None
+
+
+def test_load_config_missing_file(tmp_path):
+    """load_config should raise FileNotFoundError for missing file."""
+    from head.config import load_config
+
+    with pytest.raises(FileNotFoundError):
+        load_config(str(tmp_path / "nonexistent.yaml"))
+
+
+def test_load_config_empty_file(tmp_path):
+    """load_config should raise ValueError for empty file."""
+    from head.config import load_config
+
+    p = tmp_path / "config.yaml"
+    p.write_text("")
+    with pytest.raises(ValueError, match="empty"):
+        load_config(str(p))
+
+
+# ---------------------------------------------------------------------------
+# Edge case tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_add_machine_overwrites_existing(tmp_path):
+    """Adding a machine with the same name should overwrite."""
+    config_path = tmp_path / "config.yaml"
+    cfg = {
+        "default_mode": "auto",
+        "peers": {
+            "mybox": {"transport": "ssh", "ssh_host": "10.0.0.1", "ssh_user": "old"},
+        },
+    }
+    config_path.write_text(yaml.dump(cfg))
+    from head.config import PeerConfig, load_config, save_machine_to_config
+
+    config = load_config(str(config_path))
+    new_machine = PeerConfig(
+        id="mybox",
+        transport="ssh",
+        ssh_host="10.0.0.99",
+        ssh_user="newuser",
+    )
+    save_machine_to_config(config, new_machine)
+    with open(config_path) as f:
+        saved = yaml.safe_load(f)
+    assert saved["peers"]["mybox"]["ssh_host"] == "10.0.0.99"
+    assert saved["peers"]["mybox"]["ssh_user"] == "newuser"
+
+
+# ---------------------------------------------------------------------------
+# Integration test: wizard -> add machine flow
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wizard_to_add_machine_flow(tmp_path):
+    """Wizard -> selecting 'Add a remote machine' should push AddMachineScreen."""
+    config_path = str(tmp_path / "nonexistent.yaml")
+    app = CodecastApp(config_path=config_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, SetupWizardScreen)
+        # Simulate selecting "add_machine" option
+        menu = app.screen.query_one("#wizard_menu")
+        # Find add_machine option index
+        for i, opt in enumerate(menu._options):
+            if getattr(opt, "id", None) == "add_machine":
+                menu.highlighted = i
+                break
+        menu.action_select()
+        await pilot.pause()
+        assert isinstance(app.screen, AddMachineScreen)

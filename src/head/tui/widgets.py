@@ -46,9 +46,9 @@ class StatusPanel(Static):
         if not self.config_path:
             return []
         try:
-            from head.config import load_config_v2
+            from head.config import load_config
 
-            cfg = load_config_v2(self.config_path)
+            cfg = load_config(self.config_path)
         except Exception:
             return []
         bots: list[str] = []
@@ -129,20 +129,20 @@ class MachineTable(DataTable):
         self.config_path = config_path
 
     def on_mount(self) -> None:
-        self.add_columns("Name", "Transport", "Host", "Port")
+        self.add_columns("Name", "Transport", "Host", "Port", "Projects")
         self.cursor_type = "row"
         self._populate()
 
     def _populate(self) -> None:
         try:
-            from head.config import load_config_v2
+            from head.config import load_config
 
-            cfg = load_config_v2(self.config_path)
+            cfg = load_config(self.config_path)
             machines = getattr(cfg, "peers", {}) or {}
         except Exception:
             machines = {}
 
-        for name, machine in machines.items():
+        for name, machine in sorted(machines.items()):
             transport = getattr(machine, "transport", "?")
             if transport == "ssh":
                 host = getattr(machine, "ssh_host", "") or ""
@@ -156,7 +156,8 @@ class MachineTable(DataTable):
                 host = host[:21] + "..."
 
             port = str(getattr(machine, "port", 9100) or 9100)
-            self.add_row(name, transport, host, port, key=name)
+            project_path = getattr(machine, "project_path", "~/Projects")
+            self.add_row(name, transport, host, port, project_path, key=name)
 
     @property
     def machine_count(self) -> int:
@@ -168,12 +169,45 @@ class MachineTable(DataTable):
         self._populate()
 
     def get_selected_machine_name(self) -> str | None:
-        """Return the name of the currently selected machine, or None."""
+        """Return the name of the currently selected machine, or None.
+
+        Uses the row key which is the clean machine name (no Rich markup).
+        For unknown machines, the key is ``unknown_<name>`` — strip the prefix.
+        """
         if self.row_count == 0:
             return None
         try:
-            row = self.get_row_at(self.cursor_row)
-            # The first cell is the machine name
-            return str(row[0]) if row else None
+            row_key = list(self.rows.keys())[self.cursor_row]
+            key_str = str(row_key.value)
+            if key_str.startswith("unknown_"):
+                return key_str[len("unknown_") :]
+            return key_str
         except Exception:
             return None
+
+    def is_selected_unknown(self) -> bool:
+        """Return True if the currently selected row is an unknown machine."""
+        if self.row_count == 0:
+            return False
+        try:
+            row_key = list(self.rows.keys())[self.cursor_row]
+            return str(row_key.value).startswith("unknown_")
+        except Exception:
+            return False
+
+    def set_unknown_machines(self, names: list[str]) -> None:
+        """Append rows for machines found in sessions but missing from config."""
+        # Remove existing unknown rows first
+        keys_to_remove = [k for k in self.rows if str(k.value).startswith("unknown_")]
+        for key in keys_to_remove:
+            self.remove_row(key)
+
+        for name in names:
+            self.add_row(
+                f"[yellow]{name}[/yellow]",
+                "[yellow]\u26a0 unknown[/yellow]",
+                "[dim]—[/dim]",
+                "[dim]—[/dim]",
+                "[dim]—[/dim]",
+                key=f"unknown_{name}",
+            )

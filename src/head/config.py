@@ -39,6 +39,7 @@ class PeerConfig:
     password: Optional[str] = None  # For SSH transport: password or file: path
     daemon_port: int = 9100  # Port daemon listens on
     node_path: Optional[str] = None  # Path to node binary on peer
+    project_path: str = "~/Projects"  # Base dir for short-name path expansion
     default_paths: list[str] = field(default_factory=list)
 
     # ── Backward-compat properties (MachineConfig interface) ──
@@ -170,7 +171,6 @@ class Config:
 
 
 # Backward-compat aliases
-ConfigV2 = Config
 DaemonConfig = DaemonDeployConfig
 DiscordBotConfig = DiscordConfig
 TelegramBotConfig = TelegramConfig
@@ -244,12 +244,15 @@ def _process_value(value: Any) -> Any:
 
 
 def load_config(config_path: str = "config.yaml") -> Config:
-    """Load and parse the config.yaml file."""
-    config_file = Path(config_path)
-    if not config_file.exists():
+    """Load and parse a config file.
+
+    Expects the ``peers:`` YAML key for machine definitions.
+    """
+    path = Path(config_path)
+    if not path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    with open(config_file) as f:
+    with open(path) as f:
         raw_data: dict[str, Any] = yaml.safe_load(f)
 
     if not raw_data:
@@ -258,97 +261,51 @@ def load_config(config_path: str = "config.yaml") -> Config:
     # Expand env vars throughout
     raw: dict[str, Any] = _process_value(raw_data)
 
-    config = Config()
-    config.config_path = str(config_file.resolve())
+    cfg = Config()
 
-    # Parse peers (v2 format) or machines (v1 format)
+    # Parse peers
     peers_raw: dict[str, Any] = raw.get("peers", {})
-    machines_raw: dict[str, Any] = raw.get("machines", {})
-    combined_raw = peers_raw or machines_raw or {}
+    if peers_raw:
+        for peer_id, peer_data in peers_raw.items():
+            cfg.peers[peer_id] = _parse_peer(peer_id, peer_data or {})
 
-    for peer_id, peer_data in combined_raw.items():
-        md: dict[str, Any] = peer_data or {}
-        if peers_raw:
-            # v2 format — use _parse_peer
-            config.peers[peer_id] = _parse_peer(peer_id, md)
-        else:
-            # v1 format — translate machine fields to PeerConfig
-            host = md.get("host", peer_id)
-            is_local = md.get("localhost", _is_localhost(host))
-            transport = "local" if is_local else "ssh"
-            mc = PeerConfig(
-                id=peer_id,
-                transport=transport,
-                ssh_host=host if transport == "ssh" else None,
-                ssh_user=md.get("user", os.environ.get("USER", "root")) if transport == "ssh" else None,
-                ssh_key=expand_path(md["ssh_key"]) if "ssh_key" in md else None,
-                ssh_port=md.get("port", 22),
-                proxy_jump=md.get("proxy_jump"),
-                proxy_command=md.get("proxy_command"),
-                password=md.get("password"),
-                daemon_port=md.get("daemon_port", 9100),
-                node_path=md.get("node_path"),
-                default_paths=md.get("default_paths", []),
-            )
-            config.peers[peer_id] = mc
-
-    # Parse bot config
+    # Parse bot
     bot_raw: dict[str, Any] = raw.get("bot", {})
     if bot_raw:
-        discord_raw: Optional[dict[str, Any]] = bot_raw.get("discord")
-        if discord_raw:
-            config.bot.discord = DiscordConfig(
-                token=discord_raw.get("token", ""),
-                allowed_channels=[int(c) for c in discord_raw.get("allowed_channels", [])],
-                command_prefix=discord_raw.get("command_prefix", "/"),
-                admin_users=[int(u) for u in discord_raw.get("admin_users", [])],
-            )
-        telegram_raw: Optional[dict[str, Any]] = bot_raw.get("telegram")
-        if telegram_raw:
-            config.bot.telegram = TelegramConfig(
-                token=telegram_raw.get("token", ""),
-                allowed_users=[int(u) for u in telegram_raw.get("allowed_users", [])],
-                admin_users=[int(u) for u in telegram_raw.get("admin_users", [])],
-                allowed_chats=[int(c) for c in telegram_raw.get("allowed_chats", [])],
-            )
-        lark_raw: Optional[dict[str, Any]] = bot_raw.get("lark")
-        if lark_raw:
-            config.bot.lark = LarkConfig(
-                app_id=lark_raw.get("app_id", ""),
-                app_secret=lark_raw.get("app_secret", ""),
-                allowed_chats=[str(c) for c in lark_raw.get("allowed_chats", [])],
-                admin_users=[str(u) for u in lark_raw.get("admin_users", [])],
-                use_cards=lark_raw.get("use_cards", True),
-            )
+        cfg.bot = _parse_bot(bot_raw)
 
-    # Parse other config
-    config.default_mode = raw.get("default_mode", "auto")
-    config.tool_batch_size = int(raw.get("tool_batch_size", 15))
+    # Scalar settings
+    cfg.default_mode = raw.get("default_mode", "auto")
+    cfg.tool_batch_size = int(raw.get("tool_batch_size", 15))
 
+    # Skills
     skills_raw: dict[str, Any] = raw.get("skills", {})
     if skills_raw:
-        config.skills = SkillsConfig(
+        cfg.skills = SkillsConfig(
             shared_dir=skills_raw.get("shared_dir", "./skills"),
             sync_on_start=skills_raw.get("sync_on_start", True),
         )
 
+    # Daemon
     daemon_raw: dict[str, Any] = raw.get("daemon", {})
     if daemon_raw:
-        config.daemon = DaemonDeployConfig(
+        cfg.daemon = DaemonDeployConfig(
             install_dir=daemon_raw.get("install_dir", "~/.codecast/daemon"),
             auto_deploy=daemon_raw.get("auto_deploy", True),
             log_file=daemon_raw.get("log_file", "~/.codecast/daemon.log"),
         )
 
+    # File pool
     file_pool_raw: dict[str, Any] = raw.get("file_pool", {})
     if file_pool_raw:
-        config.file_pool = FilePoolConfig(
+        cfg.file_pool = FilePoolConfig(
             max_size=file_pool_raw.get("max_size", 1073741824),
             pool_dir=expand_env_vars(file_pool_raw.get("pool_dir", "~/.codecast/file-pool")),
             remote_dir=file_pool_raw.get("remote_dir", "/tmp/codecast/files"),
             allowed_types=file_pool_raw.get("allowed_types", list(DEFAULT_ALLOWED_FILE_TYPES)),
         )
 
+    # File forward
     file_forward_raw: dict[str, Any] = raw.get("file_forward", {})
     if file_forward_raw:
         rules = []
@@ -360,7 +317,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
                     auto=rule_raw.get("auto", False),
                 )
             )
-        config.file_forward = FileForwardConfig(
+        cfg.file_forward = FileForwardConfig(
             enabled=file_forward_raw.get("enabled", False),
             rules=rules,
             default_max_size=file_forward_raw.get("default_max_size", 5 * 1024 * 1024),
@@ -368,7 +325,9 @@ def load_config(config_path: str = "config.yaml") -> Config:
             download_dir=file_forward_raw.get("download_dir", "~/.codecast/downloads"),
         )
 
-    return config
+    cfg.config_path = str(path.resolve())
+
+    return cfg
 
 
 # ─── Config Persistence (add/remove machines) ───
@@ -378,7 +337,8 @@ def _get_config_path(config: Config) -> Path:
     """Get the config file path. Falls back to 'config.yaml' in project root."""
     if config.config_path is not None:
         return Path(config.config_path)
-    return Path(__file__).parent.parent / "config.yaml"
+    # __file__ is src/head/config.py, so .parent.parent.parent is the project root
+    return Path(__file__).parent.parent.parent / "config.yaml"
 
 
 def save_machine_to_config(config: Config, machine: PeerConfig) -> None:
@@ -393,24 +353,25 @@ def save_machine_to_config(config: Config, machine: PeerConfig) -> None:
     with open(config_path) as f:
         doc = ryaml.load(f)
 
-    # Determine which YAML key the file uses ("peers" or "machines")
-    if "peers" in doc and doc["peers"] is not None:
-        section_key = "peers"
-    else:
-        section_key = "machines"
-    if section_key not in doc or doc[section_key] is None:
-        doc[section_key] = {}
+    if "peers" not in doc or doc["peers"] is None:
+        doc["peers"] = {}
 
-    # Build machine dict
-    m: dict[str, Any] = {}
+    # Build peer dict
+    m: dict[str, Any] = {"transport": machine.transport}
     if machine.ssh_host:
-        m["host"] = machine.ssh_host
+        m["ssh_host"] = machine.ssh_host
     if machine.ssh_user:
-        m["user"] = machine.ssh_user
+        m["ssh_user"] = machine.ssh_user
     if machine.ssh_key:
         m["ssh_key"] = machine.ssh_key
     if machine.ssh_port != 22:
-        m["port"] = machine.ssh_port
+        m["ssh_port"] = machine.ssh_port
+    if machine.address:
+        m["address"] = machine.address
+    if machine.token:
+        m["token"] = machine.token
+    if machine.tls_fingerprint:
+        m["tls_fingerprint"] = machine.tls_fingerprint
     if machine.proxy_jump:
         m["proxy_jump"] = machine.proxy_jump
     if machine.proxy_command:
@@ -420,12 +381,12 @@ def save_machine_to_config(config: Config, machine: PeerConfig) -> None:
     m["daemon_port"] = machine.daemon_port
     if machine.node_path:
         m["node_path"] = machine.node_path
+    if machine.project_path != "~/Projects":
+        m["project_path"] = machine.project_path
     if machine.default_paths:
         m["default_paths"] = machine.default_paths
-    if machine.localhost:
-        m["localhost"] = True
 
-    doc[section_key][machine.id] = m
+    doc["peers"][machine.id] = m
 
     with open(config_path, "w") as f:
         ryaml.dump(doc, f)
@@ -446,11 +407,9 @@ def remove_machine_from_config(config: Config, machine_id: str) -> None:
         doc = ryaml.load(f)
 
     removed = False
-    for section_key in ("peers", "machines"):
-        if section_key in doc and doc[section_key] and machine_id in doc[section_key]:
-            del doc[section_key][machine_id]
-            removed = True
-            break
+    if "peers" in doc and doc["peers"] and machine_id in doc["peers"]:
+        del doc["peers"][machine_id]
+        removed = True
     if removed:
         with open(config_path, "w") as f:
             ryaml.dump(doc, f)
@@ -586,7 +545,7 @@ def format_ssh_hosts_for_display(entries: list[SSHHostEntry]) -> str:
     return "\n".join(lines)
 
 
-# ─── Config V2 Loaders ───
+# ─── Config Helpers ───
 
 
 def _parse_peer(peer_id: str, data: dict[str, Any]) -> PeerConfig:
@@ -606,12 +565,13 @@ def _parse_peer(peer_id: str, data: dict[str, Any]) -> PeerConfig:
         password=data.get("password"),
         daemon_port=data.get("daemon_port", 9100),
         node_path=data.get("node_path"),
+        project_path=data.get("project_path", "~/Projects"),
         default_paths=data.get("default_paths", []),
     )
 
 
-def _parse_bot_v2(raw: dict[str, Any]) -> BotConfig:
-    """Parse bot section for v2 config (includes all platforms)."""
+def _parse_bot(raw: dict[str, Any]) -> BotConfig:
+    """Parse bot section from config (all platforms)."""
     bot = BotConfig()
 
     discord_raw = raw.get("discord")
@@ -653,188 +613,11 @@ def _parse_bot_v2(raw: dict[str, Any]) -> BotConfig:
     return bot
 
 
-def load_config_v2(config_path: str) -> Config:
-    """Load and parse a config file (v2 peers format, or v1 machines format).
-
-    This is the preferred loader for CLI/TUI code. It supports both
-    ``peers:`` (v2) and ``machines:`` (v1, auto-migrated) YAML keys.
-    """
-    path = Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    with open(path) as f:
-        raw_data: dict[str, Any] = yaml.safe_load(f)
-
-    if not raw_data:
-        raise ValueError("Config file is empty")
-
-    # Expand env vars throughout
-    raw: dict[str, Any] = _process_value(raw_data)
-
-    cfg = Config()
-
-    # Parse peers (v2 format) or machines (v1 format, auto-migrate)
-    peers_raw: dict[str, Any] = raw.get("peers", {})
-    if not peers_raw:
-        # Fall back to v1 "machines" key and auto-migrate
-        machines_raw: dict[str, Any] = raw.get("machines", {})
-        if machines_raw:
-            logger.info("Auto-migrating v1 'machines' config to v2 'peers' format")
-            return migrate_v1_to_v2(config_path)
-    if peers_raw:
-        for peer_id, peer_data in peers_raw.items():
-            cfg.peers[peer_id] = _parse_peer(peer_id, peer_data or {})
-
-    # Parse bot
-    bot_raw: dict[str, Any] = raw.get("bot", {})
-    if bot_raw:
-        cfg.bot = _parse_bot_v2(bot_raw)
-
-    # Scalar settings
-    cfg.default_mode = raw.get("default_mode", "auto")
-    cfg.tool_batch_size = int(raw.get("tool_batch_size", 15))
-
-    # Skills
-    skills_raw: dict[str, Any] = raw.get("skills", {})
-    if skills_raw:
-        cfg.skills = SkillsConfig(
-            shared_dir=skills_raw.get("shared_dir", "./skills"),
-            sync_on_start=skills_raw.get("sync_on_start", True),
-        )
-
-    # Daemon
-    daemon_raw: dict[str, Any] = raw.get("daemon", {})
-    if daemon_raw:
-        cfg.daemon = DaemonDeployConfig(
-            install_dir=daemon_raw.get("install_dir", "~/.codecast/daemon"),
-            auto_deploy=daemon_raw.get("auto_deploy", True),
-            log_file=daemon_raw.get("log_file", "~/.codecast/daemon.log"),
-        )
-
-    # File pool
-    file_pool_raw: dict[str, Any] = raw.get("file_pool", {})
-    if file_pool_raw:
-        cfg.file_pool = FilePoolConfig(
-            max_size=file_pool_raw.get("max_size", 1073741824),
-            pool_dir=expand_env_vars(file_pool_raw.get("pool_dir", "~/.codecast/file-pool")),
-            remote_dir=file_pool_raw.get("remote_dir", "/tmp/codecast/files"),
-            allowed_types=file_pool_raw.get("allowed_types", list(DEFAULT_ALLOWED_FILE_TYPES)),
-        )
-
-    # File forward
-    file_forward_raw: dict[str, Any] = raw.get("file_forward", {})
-    if file_forward_raw:
-        rules = []
-        for rule_raw in file_forward_raw.get("rules", []):
-            rules.append(
-                FileForwardRule(
-                    pattern=rule_raw.get("pattern", "*"),
-                    max_size=rule_raw.get("max_size", 5 * 1024 * 1024),
-                    auto=rule_raw.get("auto", False),
-                )
-            )
-        cfg.file_forward = FileForwardConfig(
-            enabled=file_forward_raw.get("enabled", False),
-            rules=rules,
-            default_max_size=file_forward_raw.get("default_max_size", 5 * 1024 * 1024),
-            default_auto=file_forward_raw.get("default_auto", False),
-            download_dir=file_forward_raw.get("download_dir", "~/.codecast/downloads"),
-        )
-
-    cfg.config_path = str(path.resolve())
-
-    return cfg
+# ─── Config Save ───
 
 
-# ─── V1 Migration ───
-
-
-def _is_localhost_host(host: str) -> bool:
-    """Check if a host string refers to localhost (simple check for migration)."""
-    return host.lower() in ("localhost", "127.0.0.1", "::1")
-
-
-def migrate_v1_to_v2(v1_config_path: str) -> Config:
-    """Migrate a v1 config (machines) to v2 format (peers).
-
-    Transport auto-detection:
-    - If machine has localhost: true or host is localhost/127.0.0.1 -> "local"
-    - Otherwise -> "ssh"
-    """
-    path = Path(v1_config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {v1_config_path}")
-
-    with open(path) as f:
-        raw_data: dict[str, Any] = yaml.safe_load(f)
-
-    if not raw_data:
-        raise ValueError("Config file is empty")
-
-    raw: dict[str, Any] = _process_value(raw_data)
-
-    cfg = Config()
-
-    # Migrate machines -> peers
-    machines_raw: dict[str, Any] = raw.get("machines", {})
-    for machine_id, md in (machines_raw or {}).items():
-        md = md or {}
-        host = md.get("host", machine_id)
-        is_local = md.get("localhost", False) or _is_localhost_host(host)
-
-        transport = "local" if is_local else "ssh"
-
-        peer = PeerConfig(
-            id=machine_id,
-            transport=transport,
-            ssh_host=host if transport == "ssh" else None,
-            ssh_user=md.get("user") if transport == "ssh" else None,
-            ssh_key=expand_path(md["ssh_key"]) if "ssh_key" in md and transport == "ssh" else None,
-            ssh_port=md.get("port", 22),
-            proxy_jump=md.get("proxy_jump"),
-            proxy_command=md.get("proxy_command"),
-            password=md.get("password"),
-            daemon_port=md.get("daemon_port", 9100),
-            node_path=md.get("node_path"),
-            default_paths=md.get("default_paths", []),
-        )
-        cfg.peers[machine_id] = peer
-
-    # Carry over bot config
-    bot_raw: dict[str, Any] = raw.get("bot", {})
-    if bot_raw:
-        cfg.bot = _parse_bot_v2(bot_raw)
-
-    # Scalar settings
-    cfg.default_mode = raw.get("default_mode", "auto")
-    cfg.tool_batch_size = int(raw.get("tool_batch_size", 15))
-
-    # Skills
-    skills_raw: dict[str, Any] = raw.get("skills", {})
-    if skills_raw:
-        cfg.skills = SkillsConfig(
-            shared_dir=skills_raw.get("shared_dir", "./skills"),
-            sync_on_start=skills_raw.get("sync_on_start", True),
-        )
-
-    # Daemon
-    daemon_raw: dict[str, Any] = raw.get("daemon", {})
-    if daemon_raw:
-        cfg.daemon = DaemonDeployConfig(
-            install_dir=daemon_raw.get("install_dir", "~/.codecast/daemon"),
-            auto_deploy=daemon_raw.get("auto_deploy", True),
-            log_file=daemon_raw.get("log_file", "~/.codecast/daemon.log"),
-        )
-
-    return cfg
-
-
-# ─── Config V2 Save ───
-
-
-def save_config_v2(cfg: Config, config_path: str) -> None:
-    """Save a Config to a YAML file in v2 (peers) format."""
+def save_config(cfg: Config, config_path: str) -> None:
+    """Save a Config to a YAML file."""
     data: dict[str, Any] = {}
 
     # Peers
@@ -866,6 +649,8 @@ def save_config_v2(cfg: Config, config_path: str) -> None:
                 pd["daemon_port"] = peer.daemon_port
             if peer.node_path:
                 pd["node_path"] = peer.node_path
+            if peer.project_path != "~/Projects":
+                pd["project_path"] = peer.project_path
             if peer.default_paths:
                 pd["default_paths"] = peer.default_paths
             peers_dict[pid] = pd
@@ -960,4 +745,4 @@ def save_config_v2(cfg: Config, config_path: str) -> None:
     with open(path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
-    logger.info(f"Saved v2 config to {config_path}")
+    logger.info(f"Saved config to {config_path}")

@@ -9,6 +9,7 @@ Replaces the old BotBase ABC inheritance pattern.
 import asyncio
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -48,6 +49,47 @@ logger = logging.getLogger(__name__)
 
 # How often to update the "streaming" message (seconds)
 STREAM_UPDATE_INTERVAL = 1.5
+
+# ── Git URL patterns ──
+_GIT_HTTPS_RE = re.compile(r"^https?://(?:www\.)?github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$")
+_GIT_SSH_RE = re.compile(r"^git@[\w.\-]+:([^/]+)/([^/]+?)(?:\.git)?$")
+_GIT_GENERIC_HTTPS_RE = re.compile(r"^https?://[^/]+/.+?/([^/]+?)(?:\.git)?/?$")
+
+
+def _parse_git_url(url: str) -> str | None:
+    """Extract repo name from a git URL, or return None if not a git URL."""
+    for pattern in (_GIT_HTTPS_RE, _GIT_SSH_RE, _GIT_GENERIC_HTTPS_RE):
+        m = pattern.match(url)
+        if m:
+            return m.group(m.lastindex)
+    return None
+
+
+def resolve_session_path(raw_path: str, project_path: str) -> tuple[str, str | None]:
+    """Resolve a user-provided path into an absolute remote path.
+
+    Returns (resolved_path, git_url_or_none).
+    - Absolute paths and ~ paths are returned as-is.
+    - Git URLs are resolved to {project_path}/{repo_name}.
+    - Single words / relative paths are resolved to {project_path}/{raw_path}.
+    """
+    # Absolute path
+    if raw_path.startswith("/"):
+        return raw_path, None
+
+    # Home-relative path
+    if raw_path.startswith("~"):
+        return raw_path, None
+
+    # Git URL
+    repo_name = _parse_git_url(raw_path)
+    if repo_name:
+        return f"{project_path}/{repo_name}", raw_path
+
+    # Single word or relative path → expand under project_path
+    return f"{project_path}/{raw_path}", None
+
+
 # Maximum buffer before forcing a message send
 STREAM_BUFFER_FLUSH_SIZE = 1800
 
@@ -246,21 +288,44 @@ class BotEngine:
         if len(args) < 2:
             await self.send_message(
                 channel_id,
-                "Usage: `/start <peer> <remote_path>`\nExample: `/start gpu-1 ~/project` (path on the remote machine)",
+                "Usage: `/start <peer> <remote_path>`\nExample: `/start gpu-1 ~/project` or `/start gpu-1 myproject`",
             )
             return
 
         machine_id = args[0]
-        path = args[1]
+        raw_path = args[1]
 
-        # Don't expand ~ locally - the daemon expands it on the remote machine
-        # using the correct remote user's home directory
+        # Look up peer config for project_path
+        peer = self.config.peers.get(machine_id)
+        if not peer:
+            await self.send_message(channel_id, f"Unknown peer: **{machine_id}**")
+            return
+
+        # Smart path resolution: single word → ~/Projects/word, git URL → clone
+        path, git_url = resolve_session_path(raw_path, peer.project_path)
 
         if not silent_init:
-            await self.send_message(channel_id, f"\u26a1 Starting session on **{machine_id}**:`{path}`...")
+            if git_url:
+                await self.send_message(
+                    channel_id,
+                    f"\u26a1 Cloning **{git_url}** on **{machine_id}** → `{path}`...",
+                )
+            else:
+                await self.send_message(channel_id, f"\u26a1 Starting session on **{machine_id}**:`{path}`...")
 
         # Ensure SSH tunnel
         local_port = await self.ssh.ensure_tunnel(machine_id)
+
+        # Ensure project directory exists and clone if needed
+        if git_url:
+            try:
+                await self.ssh.ensure_repo(machine_id, path, git_url)
+            except Exception as exc:
+                await self.send_message(channel_id, f"Failed to clone repo: {exc}")
+                return
+        else:
+            # Ensure the directory exists (especially for short-name expansion)
+            await self.ssh.ensure_dir(machine_id, path)
 
         # Sync skills
         await self.ssh.sync_skills(machine_id, path)

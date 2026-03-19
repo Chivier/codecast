@@ -12,8 +12,17 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Input, OptionList, Static
+from textual.widgets import (
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    OptionList,
+    SelectionList,
+    Static,
+)
 from textual.widgets.option_list import Option
+from textual.widgets.selection_list import Selection
 
 from .widgets import MachineTable, StatusPanel
 
@@ -53,9 +62,9 @@ def _check_daemon_running() -> tuple[bool, int | None]:
 def _load_config(config_path: str):
     """Try to load config; return None on failure."""
     try:
-        from head.config import load_config_v2
+        from head.config import load_config
 
-        return load_config_v2(config_path)
+        return load_config(config_path)
     except Exception as exc:
         logger.warning("Failed to load config from %s: %s", config_path, exc)
         return None
@@ -77,7 +86,11 @@ _WIZARD_OPTIONS = [
 class SetupWizardScreen(Screen):
     """First-run setup wizard shown when no config exists."""
 
-    BINDINGS = [("q", "quit_app", "Quit")]
+    BINDINGS = [
+        ("q", "quit_app", "Quit"),
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+    ]
 
     def __init__(self, config_path: str, version: str = "") -> None:
         super().__init__()
@@ -109,6 +122,18 @@ class SetupWizardScreen(Screen):
             self.app.push_screen(ConfigBotScreen(self.config_path, "discord"))
         elif option_id == "config_telegram":
             self.app.push_screen(ConfigBotScreen(self.config_path, "telegram"))
+
+    def action_cursor_down(self) -> None:
+        try:
+            self.query_one("#wizard_menu", OptionList).action_cursor_down()
+        except Exception:
+            pass
+
+    def action_cursor_up(self) -> None:
+        try:
+            self.query_one("#wizard_menu", OptionList).action_cursor_up()
+        except Exception:
+            pass
 
     def action_quit_app(self) -> None:
         self.app.exit()
@@ -186,6 +211,22 @@ class DashboardScreen(Screen):
     def action_sessions(self) -> None:
         self.app.push_screen(SessionsScreen(self.config_path))
 
+    def _get_router(self):
+        """Get a SessionRouter instance, or None."""
+        try:
+            from head.session_router import SessionRouter
+
+            candidates = [
+                Path.home() / ".codecast" / "sessions.db",
+                Path(__file__).parent.parent / "sessions.db",
+            ]
+            for db_path in candidates:
+                if db_path.exists():
+                    return SessionRouter(str(db_path))
+        except Exception:
+            pass
+        return None
+
     def action_remove_machine(self) -> None:
         try:
             table = self.query_one("#machine_table", MachineTable)
@@ -195,17 +236,54 @@ class DashboardScreen(Screen):
         if not name:
             self.notify("No machine selected.", severity="warning")
             return
-        try:
-            from head.config import load_config_v2, remove_machine_from_config
 
-            cfg = load_config_v2(self.config_path)
-            remove_machine_from_config(cfg, name)
+        is_unknown = table.is_selected_unknown()
+        try:
+            if not is_unknown:
+                from head.config import load_config, save_config
+
+                cfg = load_config(self.config_path)
+                if name in cfg.peers:
+                    del cfg.peers[name]
+                    save_config(cfg, self.config_path)
+                else:
+                    self.notify(f"Machine '{name}' not found in config.", severity="warning")
+                    return
+
+            # Clean up sessions referencing this machine
+            sessions_cleaned = self._cleanup_machine_sessions(name)
+
             table.refresh_machines()
+            self._refresh_unknown_machines()
             title = self.query_one("#machine_table_title", Static)
             title.update(f"[bold cyan]Machines[/bold cyan] [bold white]({table.machine_count} configured)[/bold white]")
-            self.notify(f"Removed machine: {name}")
+            if sessions_cleaned:
+                self.notify(f"Removed machine: {name} ({sessions_cleaned} session(s) cleaned up)")
+            else:
+                self.notify(f"Removed machine: {name}")
         except Exception as exc:
             self.notify(f"Failed to remove machine: {exc}", severity="error")
+
+    def _cleanup_machine_sessions(self, machine_id: str) -> int:
+        """Destroy and delete all sessions for a machine. Returns count cleaned."""
+        router = self._get_router()
+        if not router:
+            return 0
+        machine_sessions = router.list_sessions(machine_id=machine_id)
+        for s in machine_sessions:
+            router.destroy(s.channel_id)
+        if machine_sessions:
+            try:
+                conn = router._connect()
+                conn.execute(
+                    "DELETE FROM sessions WHERE machine_id = ? AND status = 'destroyed'",
+                    (machine_id,),
+                )
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+        return len(machine_sessions)
 
     def action_cursor_down(self) -> None:
         try:
@@ -222,16 +300,103 @@ class DashboardScreen(Screen):
             pass
 
     def action_open_machine(self) -> None:
-        """Open sessions screen filtered to the selected machine."""
+        """Open sessions screen filtered to the selected machine, or resolve unknown machines."""
         try:
             table = self.query_one("#machine_table", MachineTable)
         except Exception:
             return
+
+        if table.is_selected_unknown():
+            self._resolve_unknown_machine(table)
+            return
+
         name = table.get_selected_machine_name()
         if name:
             self.app.push_screen(SessionsScreen(self.config_path, filter_machine=name))
         else:
             self.app.push_screen(SessionsScreen(self.config_path))
+
+    def _resolve_unknown_machine(self, table: MachineTable) -> None:
+        """Try to resolve an unknown machine by importing from SSH config or adding manually."""
+        name = table.get_selected_machine_name()
+        if not name:
+            return
+
+        try:
+            from head.config import parse_ssh_config
+
+            ssh_entries = parse_ssh_config()
+            match = next((e for e in ssh_entries if e.name == name), None)
+        except Exception:
+            match = None
+
+        if match:
+            self._import_ssh_host(name, match)
+        else:
+            self.app.push_screen(AddMachineScreen(self.config_path))
+
+    def _import_ssh_host(self, name: str, entry) -> None:
+        """Import a single SSH host as a machine."""
+        from head.config import Config, PeerConfig, load_config, save_config
+
+        try:
+            cfg = load_config(self.config_path)
+        except FileNotFoundError:
+            cfg = Config()
+
+        hostname = entry.hostname or entry.name
+        try:
+            from head.config import _is_localhost
+
+            is_local = _is_localhost(hostname)
+        except Exception:
+            is_local = hostname in ("localhost", "127.0.0.1", "::1")
+
+        if is_local:
+            peer = PeerConfig(id=name, transport="local")
+        else:
+            peer = PeerConfig(
+                id=name,
+                transport="ssh",
+                ssh_host=hostname,
+                ssh_user=entry.user,
+                proxy_jump=getattr(entry, "proxy_jump", None),
+            )
+
+        cfg.peers[name] = peer
+        save_config(cfg, self.config_path)
+        self.notify(f"Imported '{name}' from SSH config.")
+
+        # Refresh the dashboard
+        try:
+            table = self.query_one("#machine_table", MachineTable)
+            table.refresh_machines()
+            self._refresh_unknown_machines()
+            title = self.query_one("#machine_table_title", Static)
+            title.update(f"[bold cyan]Machines[/bold cyan] [bold white]({table.machine_count} configured)[/bold white]")
+        except Exception:
+            pass
+
+    def _refresh_unknown_machines(self) -> None:
+        """Find machines referenced in sessions but not in config, and display them."""
+        try:
+            table = self.query_one("#machine_table", MachineTable)
+            cfg = _load_config(self.config_path)
+            existing_peers = set((cfg.peers or {}).keys()) if cfg else set()
+
+            router = self._get_router()
+            if not router:
+                table.set_unknown_machines([])
+                return
+
+            all_sessions = router.list_sessions()
+            unknown = set()
+            for s in all_sessions:
+                if s.machine_id not in existing_peers:
+                    unknown.add(s.machine_id)
+            table.set_unknown_machines(sorted(unknown))
+        except Exception:
+            pass
 
     def on_screen_resume(self) -> None:
         """Refresh status panel and machine table when returning from a sub-screen."""
@@ -288,6 +453,7 @@ class HelpScreen(Screen):
             "[bold]Sessions view:[/bold]\n"
             "  [cyan]t[/cyan]         Toggle sort (newest/oldest)\n"
             "  [cyan]r / Del[/cyan]   Remove selected session\n"
+            "  [yellow]\u26a0[/yellow]          Unknown machine (not in config)\n"
             "\n"
             "[bold]CLI equivalents:[/bold]\n"
             "  codecast start       Start the daemon\n"
@@ -315,7 +481,11 @@ class HelpScreen(Screen):
 class StartHeadScreen(Screen):
     """Screen for starting or stopping the head node."""
 
-    BINDINGS = [("escape", "go_back", "Back")]
+    BINDINGS = [
+        ("escape", "go_back", "Back"),
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+    ]
 
     def __init__(self, config_path: str) -> None:
         super().__init__()
@@ -413,6 +583,18 @@ class StartHeadScreen(Screen):
             self.notify("Head node is not running.")
         self.app.pop_screen()
 
+    def action_cursor_down(self) -> None:
+        try:
+            self.query_one("#head_menu", OptionList).action_cursor_down()
+        except Exception:
+            pass
+
+    def action_cursor_up(self) -> None:
+        try:
+            self.query_one("#head_menu", OptionList).action_cursor_up()
+        except Exception:
+            pass
+
     def action_go_back(self) -> None:
         self.app.pop_screen()
 
@@ -425,7 +607,11 @@ class StartHeadScreen(Screen):
 class StartDaemonScreen(Screen):
     """Screen for starting or stopping the local daemon."""
 
-    BINDINGS = [("escape", "go_back", "Back")]
+    BINDINGS = [
+        ("escape", "go_back", "Back"),
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+    ]
 
     def __init__(self, config_path: str) -> None:
         super().__init__()
@@ -519,6 +705,18 @@ class StartDaemonScreen(Screen):
         self.notify("Daemon stopped.")
         self.app.pop_screen()
 
+    def action_cursor_down(self) -> None:
+        try:
+            self.query_one("#daemon_menu", OptionList).action_cursor_down()
+        except Exception:
+            pass
+
+    def action_cursor_up(self) -> None:
+        try:
+            self.query_one("#daemon_menu", OptionList).action_cursor_up()
+        except Exception:
+            pass
+
     def action_go_back(self) -> None:
         self.app.pop_screen()
 
@@ -531,7 +729,11 @@ class StartDaemonScreen(Screen):
 class AddMachineScreen(Screen):
     """Screen for adding a new machine (manual or SSH import)."""
 
-    BINDINGS = [("escape", "go_back", "Back")]
+    BINDINGS = [
+        ("escape", "go_back", "Back"),
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+    ]
 
     def __init__(self, config_path: str) -> None:
         super().__init__()
@@ -563,9 +765,7 @@ class AddMachineScreen(Screen):
             self._switch_to_manual_input()
         elif option_id == "ssh_import":
             self._mode = "ssh_import"
-            self._show_ssh_hosts()
-        elif option_id and option_id.startswith("ssh_host:"):
-            self._import_ssh_host(option_id[len("ssh_host:") :])
+            self.app.push_screen(SSHImportScreen(self.config_path))
 
     def _switch_to_manual_input(self) -> None:
         """Replace option list with manual input fields."""
@@ -578,84 +778,6 @@ class AddMachineScreen(Screen):
             pass
         container = self.query_one("#add_machine_container", Vertical)
         container.mount(Input(placeholder="e.g. my-server", id="machine_input"))
-
-    def _show_ssh_hosts(self) -> None:
-        """Show available SSH hosts from ~/.ssh/config."""
-        try:
-            from head.config import load_config_v2, parse_ssh_config
-
-            ssh_entries = parse_ssh_config()
-            cfg = load_config_v2(self.config_path) if Path(self.config_path).exists() else None
-            existing = set((cfg.peers or {}).keys()) if cfg else set()
-        except Exception:
-            ssh_entries = []
-            existing = set()
-
-        # Filter out already-configured machines and deduplicate by name
-        seen: set[str] = set()
-        available: list = []
-        for e in ssh_entries:
-            if e.name not in existing and e.name not in seen:
-                seen.add(e.name)
-                available.append(e)
-
-        prompt = self.query_one("#add_machine_prompt", Static)
-        method_list = self.query_one("#add_machine_method", OptionList)
-
-        if not available:
-            prompt.update("No new SSH hosts found in ~/.ssh/config.")
-            method_list.clear_options()
-            return
-
-        prompt.update(f"Select SSH host to import ({len(available)} available):")
-        method_list.clear_options()
-        for entry in available:
-            host_info = entry.hostname or entry.name
-            if entry.user:
-                host_info = f"{entry.user}@{host_info}"
-            method_list.add_option(Option(f"{entry.name} ({host_info})", id=f"ssh_host:{entry.name}"))
-
-    def _import_ssh_host(self, host_name: str) -> None:
-        """Import an SSH host from ssh config as a machine."""
-        from head.config import Config, PeerConfig, load_config_v2, parse_ssh_config, save_config_v2
-
-        ssh_entries = parse_ssh_config()
-        entry = next((e for e in ssh_entries if e.name == host_name), None)
-        if not entry:
-            self.notify(f"SSH host '{host_name}' not found.", severity="error")
-            self.app.pop_screen()
-            return
-
-        try:
-            cfg = load_config_v2(self.config_path)
-        except FileNotFoundError:
-            cfg = Config()
-
-        hostname = entry.hostname or entry.name
-        # Check if this is a localhost machine
-        try:
-            from head.config import _is_localhost
-
-            is_local = _is_localhost(hostname)
-        except Exception:
-            is_local = hostname in ("localhost", "127.0.0.1", "::1")
-
-        if is_local:
-            peer = PeerConfig(id=host_name, transport="local")
-        else:
-            peer = PeerConfig(
-                id=host_name,
-                transport="ssh",
-                ssh_host=hostname,
-                ssh_user=entry.user,
-                proxy_jump=entry.proxy_jump,
-            )
-
-        cfg.peers[host_name] = peer
-        Path(self.config_path).parent.mkdir(parents=True, exist_ok=True)
-        save_config_v2(cfg, self.config_path)
-        self.notify(f"Machine '{host_name}' imported from SSH config.")
-        self.app.pop_screen()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
@@ -687,10 +809,10 @@ class AddMachineScreen(Screen):
             self.app.pop_screen()
 
     def _save_machine(self, address: str) -> None:
-        from head.config import Config, PeerConfig, load_config_v2, save_config_v2
+        from head.config import Config, PeerConfig, load_config, save_config
 
         try:
-            cfg = load_config_v2(self.config_path)
+            cfg = load_config(self.config_path)
         except FileNotFoundError:
             cfg = Config()
 
@@ -710,7 +832,254 @@ class AddMachineScreen(Screen):
             )
         cfg.peers[self._machine_name] = peer
         Path(self.config_path).parent.mkdir(parents=True, exist_ok=True)
-        save_config_v2(cfg, self.config_path)
+        save_config(cfg, self.config_path)
+
+    def action_cursor_down(self) -> None:
+        try:
+            self.query_one("#add_machine_method", OptionList).action_cursor_down()
+        except Exception:
+            pass
+
+    def action_cursor_up(self) -> None:
+        try:
+            self.query_one("#add_machine_method", OptionList).action_cursor_up()
+        except Exception:
+            pass
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+
+class SSHImportScreen(Screen):
+    """Screen for importing machines from SSH config with search and multi-select."""
+
+    BINDINGS = [
+        ("escape", "go_back", "Back"),
+        ("slash", "focus_search", "Search"),
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+    ]
+
+    def __init__(self, config_path: str) -> None:
+        super().__init__()
+        self.config_path = config_path
+        self._available: list = []  # list of ssh entries
+        self._entry_map: dict[str, object] = {}  # name -> ssh entry
+        self._selected: set[str] = set()  # track selections across filters
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Vertical(
+            Static("Import from SSH config\n", id="ssh_import_title"),
+            Input(placeholder="Type to filter, Enter to jump to list, Esc to clear", id="ssh_search"),
+            Static("Loading...", id="ssh_status"),
+            SelectionList[str](id="ssh_host_list"),
+            Static(
+                "[bold]Space[/bold] toggle  "
+                "[bold]Enter[/bold] import selected  "
+                "[bold]/[/bold] search  "
+                "[bold]Tab[/bold] switch focus  "
+                "[bold]j/k[/bold] navigate  "
+                "[bold]Esc[/bold] clear/back",
+                id="ssh_help",
+            ),
+            id="ssh_import_container",
+        )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._load_ssh_hosts()
+
+    def _load_ssh_hosts(self) -> None:
+        """Load SSH hosts and populate the selection list."""
+        try:
+            from head.config import load_config, parse_ssh_config
+
+            ssh_entries = parse_ssh_config()
+            cfg = load_config(self.config_path) if Path(self.config_path).exists() else None
+            existing = set((cfg.peers or {}).keys()) if cfg else set()
+        except Exception:
+            ssh_entries = []
+            existing = set()
+
+        seen: set[str] = set()
+        self._available = []
+        for e in ssh_entries:
+            if e.name not in existing and e.name not in seen:
+                seen.add(e.name)
+                self._available.append(e)
+                self._entry_map[e.name] = e
+
+        status = self.query_one("#ssh_status", Static)
+        sel_list = self.query_one("#ssh_host_list", SelectionList)
+
+        if not self._available:
+            status.update("No new SSH hosts found in ~/.ssh/config.")
+            return
+
+        self._update_status()
+        self._populate_list(self._available)
+        sel_list.focus()
+
+    def _format_entry(self, entry) -> str:
+        """Format an SSH entry for display."""
+        host_info = entry.hostname or entry.name
+        if entry.user:
+            host_info = f"{entry.user}@{host_info}"
+        label = f"{entry.name} ({host_info})"
+        if getattr(entry, "proxy_jump", None):
+            label += f" via {entry.proxy_jump}"
+        return label
+
+    def _get_filtered(self) -> list:
+        """Get entries matching current search query."""
+        search = self.query_one("#ssh_search", Input)
+        query = search.value.strip().lower()
+        if not query:
+            return list(self._available)
+        return [
+            e
+            for e in self._available
+            if query in e.name.lower() or query in (e.hostname or "").lower() or query in (e.user or "").lower()
+        ]
+
+    def _populate_list(self, entries: list) -> None:
+        """Populate the selection list, preserving selection state."""
+        sel_list = self.query_one("#ssh_host_list", SelectionList)
+        sel_list.clear_options()
+        for entry in entries:
+            selected = entry.name in self._selected
+            sel_list.add_option(Selection(self._format_entry(entry), entry.name, selected))
+
+    def _update_status(self) -> None:
+        """Update status line with current counts."""
+        filtered = self._get_filtered()
+        count = len(self._selected)
+        search = self.query_one("#ssh_search", Input)
+        has_query = bool(search.value.strip())
+        status = self.query_one("#ssh_status", Static)
+        word = "shown" if has_query else "available"
+        status.update(f"{len(filtered)} hosts {word} ({count} selected):")
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Filter the host list as the user types."""
+        if event.input.id != "ssh_search":
+            return
+        filtered = self._get_filtered()
+        self._populate_list(filtered)
+        self._update_status()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter in search box moves focus to the selection list."""
+        if event.input.id != "ssh_search":
+            return
+        self.query_one("#ssh_host_list", SelectionList).focus()
+
+    def on_key(self, event) -> None:
+        """Handle Escape and Enter context-sensitively."""
+        search = self.query_one("#ssh_search", Input)
+        sel_list = self.query_one("#ssh_host_list", SelectionList)
+
+        if event.key == "escape":
+            if search.has_focus and search.value:
+                # Clear search and refocus list
+                search.value = ""
+                sel_list.focus()
+                event.prevent_default()
+                event.stop()
+            elif search.value:
+                # List focused but search has text — clear search first
+                search.value = ""
+                event.prevent_default()
+                event.stop()
+            # else: let binding handle go_back
+
+        elif event.key == "enter":
+            if search.has_focus:
+                # Enter in search box -> move focus to list
+                sel_list.focus()
+                event.prevent_default()
+                event.stop()
+            elif sel_list.has_focus:
+                # Enter on list -> confirm import
+                event.prevent_default()
+                event.stop()
+                self.action_confirm_import()
+
+    def on_selection_list_selection_toggled(self, event: SelectionList.SelectionToggled) -> None:
+        """Track selections persistently across filter changes."""
+        value = event.selection_list.get_option_at_index(event.selection_index).value
+        if value in self._selected:
+            self._selected.discard(value)
+        else:
+            self._selected.add(value)
+        self._update_status()
+
+    def action_cursor_down(self) -> None:
+        try:
+            self.query_one("#ssh_host_list", SelectionList).action_cursor_down()
+        except Exception:
+            pass
+
+    def action_cursor_up(self) -> None:
+        try:
+            self.query_one("#ssh_host_list", SelectionList).action_cursor_up()
+        except Exception:
+            pass
+
+    def action_focus_search(self) -> None:
+        self.query_one("#ssh_search", Input).focus()
+
+    def action_confirm_import(self) -> None:
+        """Import all selected hosts."""
+        if not self._selected:
+            self.notify("No hosts selected.", severity="warning")
+            return
+        self._import_hosts(list(self._selected))
+
+    def _import_hosts(self, host_names: list[str]) -> None:
+        """Import multiple SSH hosts as machines."""
+        from head.config import Config, PeerConfig, load_config, save_config
+
+        try:
+            cfg = load_config(self.config_path)
+        except FileNotFoundError:
+            cfg = Config()
+
+        imported = 0
+        for name in host_names:
+            entry = self._entry_map.get(name)
+            if not entry:
+                continue
+
+            hostname = entry.hostname or entry.name
+            try:
+                from head.config import _is_localhost
+
+                is_local = _is_localhost(hostname)
+            except Exception:
+                is_local = hostname in ("localhost", "127.0.0.1", "::1")
+
+            if is_local:
+                peer = PeerConfig(id=name, transport="local")
+            else:
+                peer = PeerConfig(
+                    id=name,
+                    transport="ssh",
+                    ssh_host=hostname,
+                    ssh_user=entry.user,
+                    proxy_jump=getattr(entry, "proxy_jump", None),
+                )
+
+            cfg.peers[name] = peer
+            imported += 1
+
+        Path(self.config_path).parent.mkdir(parents=True, exist_ok=True)
+        save_config(cfg, self.config_path)
+        self.notify(f"Imported {imported} machine(s) from SSH config.")
+        # Pop both SSHImportScreen and AddMachineScreen
+        self.app.pop_screen()
+        self.app.pop_screen()
 
     def action_go_back(self) -> None:
         self.app.pop_screen()
@@ -786,12 +1155,12 @@ class ConfigBotScreen(Screen):
             Config,
             DiscordConfig,
             TelegramConfig,
-            load_config_v2,
-            save_config_v2,
+            load_config,
+            save_config,
         )
 
         try:
-            cfg = load_config_v2(self.config_path)
+            cfg = load_config(self.config_path)
         except FileNotFoundError:
             cfg = Config()
 
@@ -801,7 +1170,7 @@ class ConfigBotScreen(Screen):
             cfg.bot.telegram = TelegramConfig(token=token)
 
         Path(self.config_path).parent.mkdir(parents=True, exist_ok=True)
-        save_config_v2(cfg, self.config_path)
+        save_config(cfg, self.config_path)
 
     def action_go_back(self) -> None:
         self.app.pop_screen()
@@ -839,6 +1208,7 @@ class SessionsScreen(Screen):
         self._row_session_map: dict[int, object] = {}  # row index -> Session
         self._row_machine_map: dict[int, str] = {}  # row index -> machine_id (header rows)
         self._filter_machine: str | None = filter_machine
+        self._init_filtered: bool = filter_machine is not None  # opened pre-filtered from dashboard
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -885,19 +1255,26 @@ class SessionsScreen(Screen):
             reverse=self._sort_descending,
         )
 
-        # Group by machine
+        # Group by machine (sorted alphabetically)
         from collections import OrderedDict
 
-        grouped: OrderedDict[str, list] = OrderedDict()
+        raw_grouped: dict[str, list] = {}
         for s in sessions_sorted:
-            grouped.setdefault(s.machine_id, []).append(s)
+            raw_grouped.setdefault(s.machine_id, []).append(s)
+        grouped: OrderedDict[str, list] = OrderedDict(sorted(raw_grouped.items()))
+
+        # Determine which machines exist in config
+        cfg = _load_config(self.config_path)
+        existing_peers = set((cfg.peers or {}).keys()) if cfg else set()
 
         row_idx = 0
         for machine_id, machine_sessions in grouped.items():
+            is_unknown = machine_id not in existing_peers
             if not self._filter_machine:
                 # Machine header row (only in all-machines view)
+                warning = " [yellow]⚠[/yellow]" if is_unknown else ""
                 table.add_row(
-                    f"[bold cyan]▸ {machine_id}[/bold cyan]",
+                    f"[bold cyan]▸ {machine_id}[/bold cyan]{warning}",
                     "",
                     "",
                     "",
@@ -1019,15 +1396,17 @@ class SessionsScreen(Screen):
         machine_id = self._row_machine_map.get(cursor_row)
         if machine_id:
             self._filter_machine = machine_id
+            self._init_filtered = False  # drilled down within screen, back clears filter
             self._populate_sessions(table)
 
     def action_go_back(self) -> None:
-        if self._filter_machine:
-            # Go back to all-machines view
+        if self._filter_machine and not self._init_filtered:
+            # Drilled down within sessions view — go back to all-machines view
             self._filter_machine = None
             table = self.query_one("#sessions_table", DataTable)
             self._populate_sessions(table)
         else:
+            # Either unfiltered or opened pre-filtered from dashboard — pop screen
             self.app.pop_screen()
 
 
@@ -1039,7 +1418,11 @@ class SessionsScreen(Screen):
 class StartWebUIScreen(Screen):
     """Screen for starting or stopping the WebUI."""
 
-    BINDINGS = [("escape", "go_back", "Back")]
+    BINDINGS = [
+        ("escape", "go_back", "Back"),
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+    ]
 
     def __init__(self, config_path: str) -> None:
         super().__init__()
@@ -1109,6 +1492,18 @@ class StartWebUIScreen(Screen):
         except Exception as exc:
             self.notify(f"Failed to stop WebUI: {exc}")
         self.app.pop_screen()
+
+    def action_cursor_down(self) -> None:
+        try:
+            self.query_one("#webui_menu", OptionList).action_cursor_down()
+        except Exception:
+            pass
+
+    def action_cursor_up(self) -> None:
+        try:
+            self.query_one("#webui_menu", OptionList).action_cursor_up()
+        except Exception:
+            pass
 
     def action_go_back(self) -> None:
         self.app.pop_screen()

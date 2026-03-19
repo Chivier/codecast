@@ -407,7 +407,7 @@ class TestFindSessionByNameOrId:
 
 class TestPeerColumnCompatibility:
     def test_peer_column_compatibility(self, router):
-        """Session router machine_id field works (will become peer in v2)."""
+        """Session router machine_id field works with peer configs."""
         name = router.register(
             channel_id="discord:123",
             machine_id="gpu-1",

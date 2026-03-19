@@ -116,6 +116,8 @@ def mock_ssh():
     ssh.ensure_tunnel = AsyncMock(return_value=19100)
     ssh.get_local_port = MagicMock(return_value=None)
     ssh.sync_skills = AsyncMock()
+    ssh.ensure_dir = AsyncMock()
+    ssh.ensure_repo = AsyncMock()
     ssh.list_machines = AsyncMock(return_value=[])
     return ssh
 
@@ -965,6 +967,141 @@ class TestStartTildeExpansion:
             assert actual_path == "/home/user/project"
 
 
+# ─── Smart Path Resolution ───
+
+
+class TestResolveSessionPath:
+    """Tests for resolve_session_path (pure function)."""
+
+    def test_absolute_path(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("/home/user/project", "~/Projects")
+        assert path == "/home/user/project"
+        assert git_url is None
+
+    def test_tilde_path(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("~/myproject", "~/Projects")
+        assert path == "~/myproject"
+        assert git_url is None
+
+    def test_single_word_expansion(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("myapp", "~/Projects")
+        assert path == "~/Projects/myapp"
+        assert git_url is None
+
+    def test_relative_path_expansion(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("foo/bar", "~/Projects")
+        assert path == "~/Projects/foo/bar"
+        assert git_url is None
+
+    def test_custom_project_path(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("myapp", "~/workspace")
+        assert path == "~/workspace/myapp"
+        assert git_url is None
+
+    def test_github_https_url(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("https://github.com/user/repo", "~/Projects")
+        assert path == "~/Projects/repo"
+        assert git_url == "https://github.com/user/repo"
+
+    def test_github_https_with_git_suffix(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("https://github.com/user/repo.git", "~/Projects")
+        assert path == "~/Projects/repo"
+        assert git_url == "https://github.com/user/repo.git"
+
+    def test_github_ssh_url(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("git@github.com:user/repo.git", "~/Projects")
+        assert path == "~/Projects/repo"
+        assert git_url == "git@github.com:user/repo.git"
+
+    def test_github_ssh_url_no_suffix(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("git@github.com:user/repo", "~/Projects")
+        assert path == "~/Projects/repo"
+        assert git_url == "git@github.com:user/repo"
+
+    def test_generic_https_git_url(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("https://gitlab.com/org/subgroup/repo.git", "~/Projects")
+        assert path == "~/Projects/repo"
+        assert git_url == "https://gitlab.com/org/subgroup/repo.git"
+
+    def test_github_url_trailing_slash(self):
+        from head.engine import resolve_session_path
+
+        path, git_url = resolve_session_path("https://github.com/user/repo/", "~/Projects")
+        assert path == "~/Projects/repo"
+        assert git_url == "https://github.com/user/repo/"
+
+
+class TestSmartPathStart:
+    """Integration tests for cmd_start with smart path resolution."""
+
+    @pytest.mark.asyncio
+    async def test_single_word_expands(self, bot, mock_daemon):
+        """Single word should expand using peer's project_path."""
+        await bot.cmd_start("discord:100", ["gpu-1", "myapp"])
+        call_args = mock_daemon.create_session.call_args
+        assert call_args is not None
+        actual_path = call_args[0][1]
+        assert actual_path == "~/Projects/myapp"
+
+    @pytest.mark.asyncio
+    async def test_git_url_triggers_clone(self, bot, mock_daemon, mock_ssh):
+        """Git URL should trigger ensure_repo call."""
+        await bot.cmd_start("discord:100", ["gpu-1", "https://github.com/user/repo"])
+        mock_ssh.ensure_repo.assert_called_once_with("gpu-1", "~/Projects/repo", "https://github.com/user/repo")
+        call_args = mock_daemon.create_session.call_args
+        assert call_args is not None
+        actual_path = call_args[0][1]
+        assert actual_path == "~/Projects/repo"
+
+    @pytest.mark.asyncio
+    async def test_absolute_path_no_expansion(self, bot, mock_daemon, mock_ssh):
+        """Absolute path should not trigger ensure_repo or expand."""
+        await bot.cmd_start("discord:100", ["gpu-1", "/home/user/project"])
+        mock_ssh.ensure_repo.assert_not_called()
+        call_args = mock_daemon.create_session.call_args
+        assert call_args is not None
+        actual_path = call_args[0][1]
+        assert actual_path == "/home/user/project"
+
+    @pytest.mark.asyncio
+    async def test_unknown_peer_returns_error(self, bot, mock_daemon):
+        """Unknown peer should return error without calling daemon."""
+        await bot.cmd_start("discord:100", ["nonexistent", "myapp"])
+        texts = bot.get_all_message_texts()
+        assert any("Unknown peer" in t for t in texts)
+        mock_daemon.create_session.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_custom_project_path(self, bot, mock_daemon, mock_config):
+        """Peer with custom project_path should use it for expansion."""
+        mock_config.peers["gpu-1"].project_path = "~/workspace"
+        await bot.cmd_start("discord:100", ["gpu-1", "myapp"])
+        call_args = mock_daemon.create_session.call_args
+        assert call_args is not None
+        actual_path = call_args[0][1]
+        assert actual_path == "~/workspace/myapp"
+
+
 # ─── Add Machine from SSH Config ───
 
 
@@ -1041,11 +1178,11 @@ class TestAdminCommands:
         assert "admin" in msg.lower()
 
 
-# ─── Peer Command Aliases (v2) ───
+# ─── Peer Command Aliases ───
 
 
 class TestPeerAliases:
-    """Test that v2 peer command aliases route to the same handlers as machine commands."""
+    """Test that peer command aliases route to the same handlers as machine commands."""
 
     @pytest.mark.asyncio
     async def test_add_peer_alias(self, bot):

@@ -282,7 +282,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
 
     # ── Peers ──
     try:
-        from head.config import load_config_v2
+        from head.config import load_config
 
         cfg_path = args.config
         if not cfg_path:
@@ -295,7 +295,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
                     cfg_path = candidate
                     break
         if cfg_path:
-            cfg = load_config_v2(cfg_path)
+            cfg = load_config(cfg_path)
             peers = getattr(cfg, "peers", {}) or {}
             print(f"Peers:      {len(peers)} machines configured")
         else:
@@ -307,10 +307,10 @@ def _cmd_status(args: argparse.Namespace) -> None:
 def _cmd_peers(args: argparse.Namespace) -> None:
     """List configured peers."""
     try:
-        from head.config import load_config_v2
+        from head.config import load_config
 
         cfg_path = args.config or str(Path.home() / ".codecast" / "config.yaml")
-        cfg = load_config_v2(cfg_path)
+        cfg = load_config(cfg_path)
         peers = cfg.peers
         if not peers:
             print("No peers configured.")
@@ -409,9 +409,9 @@ def _cmd_head(args: argparse.Namespace) -> None:
 
     # Load config and show summary
     try:
-        from head.config import load_config_v2
+        from head.config import load_config
 
-        cfg = load_config_v2(cfg_path)
+        cfg = load_config(cfg_path)
     except Exception as exc:
         print(f"Failed to load config: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -468,10 +468,10 @@ def _webui_start(args: argparse.Namespace) -> None:
     # Load config (optional -- webui works without it)
     config = None
     try:
-        from head.config import load_config_v2
+        from head.config import load_config
 
         cfg_path = args.config or str(Path.home() / ".codecast" / "config.yaml")
-        config = load_config_v2(cfg_path)
+        config = load_config(cfg_path)
     except Exception:
         pass
 
