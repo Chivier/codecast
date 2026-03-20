@@ -253,45 +253,45 @@ def _cmd_start(args: argparse.Namespace) -> None:
 
 
 def _cmd_stop(args: argparse.Namespace) -> None:
-    """Stop the running daemon and wait for it to exit."""
+    """Stop ALL running codecast-daemon processes and wait for them to exit."""
+    _kill_all_daemons()
+    print("Daemon stopped.")
+
+
+def _kill_all_daemons() -> None:
+    """Kill every codecast-daemon process and wait until none remain."""
     import time
 
-    stopped = False
+    # 1) SIGTERM the PID-file process (if any)
     daemon_pid = _read_pid_file(_DAEMON_PID_FILE)
-
-    # Try PID file first (most reliable)
     if daemon_pid is not None and _pid_alive(daemon_pid):
         try:
             os.kill(daemon_pid, signal.SIGTERM)
-            stopped = True
         except ProcessLookupError:
             pass
 
-    # Fallback to pkill if PID file didn't work
-    if not stopped:
+    # 2) SIGTERM all other codecast-daemon processes (catches strays)
+    try:
+        subprocess.run(["pkill", "-f", "codecast-daemon"], check=False)
+    except FileNotFoundError:
+        pass
+
+    # 3) Wait until no codecast-daemon processes remain (up to 5s)
+    for _ in range(50):
+        if _find_process("codecast-daemon") is None:
+            break
+        time.sleep(0.1)
+    else:
+        # Still alive — force kill all
         try:
-            subprocess.run(["pkill", "-f", "codecast-daemon"], check=False)
+            subprocess.run(["pkill", "-9", "-f", "codecast-daemon"], check=False)
         except FileNotFoundError:
             pass
+        time.sleep(0.1)
 
-    # Wait for the process to actually die so the port is freed
-    if daemon_pid is not None and _pid_alive(daemon_pid):
-        for _ in range(50):  # up to 5 seconds
-            if not _pid_alive(daemon_pid):
-                break
-            time.sleep(0.1)
-        else:
-            # Still alive after timeout — force kill
-            try:
-                os.kill(daemon_pid, signal.SIGKILL)
-                time.sleep(0.1)
-            except ProcessLookupError:
-                pass
-
-    # Remove PID and port files
+    # 4) Clean up PID and port files
     _DAEMON_PID_FILE.unlink(missing_ok=True)
     _PORT_FILE.unlink(missing_ok=True)
-    print("Daemon stopped.")
 
 
 def _cmd_restart(args: argparse.Namespace) -> None:
