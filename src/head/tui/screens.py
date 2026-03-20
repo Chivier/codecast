@@ -1050,21 +1050,77 @@ class StartDaemonScreen(Screen):
         threading.Thread(target=_run, daemon=True).start()
 
     def _start_daemon(self) -> None:
-        """Start daemon as subprocess (non-blocking)."""
-        try:
-            cmd = [sys.executable, "-m", "head.cli", "start"]
-            if self.config_path:
-                cmd.extend(["-c", self.config_path])
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            self.notify("Daemon starting...")
-        except Exception as exc:
-            self.notify(f"Failed to start daemon: {exc}")
-        self.app.pop_screen()
+        """Start daemon, verify it's healthy, show errors if it fails."""
+        import threading
+        import time
+
+        from head.cli import _DAEMON_PID_FILE, _PORT_FILE
+
+        # Clean up stale PID/port files from a killed daemon
+        _DAEMON_PID_FILE.unlink(missing_ok=True)
+        _PORT_FILE.unlink(missing_ok=True)
+
+        log_widget = self.query_one("#daemon_log", Static)
+        log_widget.update("[dim]Starting daemon...[/dim]")
+
+        def _run() -> None:
+            try:
+                cmd = [sys.executable, "-m", "head.cli", "start"]
+                if self.config_path:
+                    cmd.extend(["-c", self.config_path])
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    start_new_session=True,
+                )
+                # Wait briefly for the CLI start command to finish
+                # (it spawns the daemon and exits, typically < 2s)
+                try:
+                    output, _ = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    output = proc.stdout.read() if proc.stdout else ""
+                    output += "\nError: start command timed out"
+
+                output = output.strip() if output else ""
+
+                # Give daemon a moment to bind and write port file
+                time.sleep(0.5)
+
+                # Verify daemon is actually healthy
+                from head.process_monitor import daemon_healthy, read_port_file
+
+                port = read_port_file()
+                healthy = port is not None and daemon_healthy(port)
+
+                def _finish() -> None:
+                    if healthy:
+                        self.notify(f"Daemon started on port {port}")
+                        self.app.pop_screen()
+                    else:
+                        # Show what went wrong
+                        error_msg = output if output else "Daemon failed to start (no output)"
+                        log_widget.update(f"[red]{error_msg}[/red]")
+                        self.notify("Daemon failed to start", severity="error")
+                        self._refresh_ui()
+
+                self.app.call_from_thread(_finish)
+
+            except Exception as exc:
+
+                def _error() -> None:
+                    log_widget.update(f"[red]Error: {exc}[/red]")
+                    self.notify(f"Failed: {exc}", severity="error")
+                    self._refresh_ui()
+
+                try:
+                    self.app.call_from_thread(_error)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _stop_daemon_only(self) -> None:
         """Stop daemon without popping screen (for restart)."""
