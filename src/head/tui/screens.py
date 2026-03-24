@@ -359,6 +359,44 @@ class DashboardScreen(Screen):
         )
         yield Footer()
 
+    def on_mount(self) -> None:
+        """Auto-start the head node if bots are configured and it's not running."""
+        self._auto_start_head()
+
+    def _auto_start_head(self) -> None:
+        """Start the head node automatically if bots are configured and head is not running."""
+        import subprocess
+        import sys
+
+        from head.cli import _HEAD_PID_FILE, _pid_alive, _read_pid_file
+
+        head_pid = _read_pid_file(_HEAD_PID_FILE)
+        if head_pid is not None and _pid_alive(head_pid):
+            return  # Already running
+
+        cfg = _load_config(self.config_path)
+        if not cfg or not cfg.bot:
+            return
+
+        has_bot = (
+            (cfg.bot.discord and getattr(cfg.bot.discord, "token", None))
+            or (cfg.bot.telegram and getattr(cfg.bot.telegram, "token", None))
+            or (getattr(cfg.bot, "lark", None) and getattr(cfg.bot.lark, "app_id", None))
+        )
+        if not has_bot:
+            return
+
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "head.cli", "head", "start", "-y", "-c", self.config_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self.notify("Head node auto-started.")
+        except Exception as exc:
+            self.notify(f"Failed to auto-start head: {exc}", severity="error")
+
     def action_toggle_daemon(self) -> None:
         self.app.push_screen(StartDaemonScreen(self.config_path))
 

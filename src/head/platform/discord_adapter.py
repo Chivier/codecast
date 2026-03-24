@@ -25,9 +25,6 @@ from head.config import Config, DiscordConfig
 from head.file_pool import FilePool, FileEntry
 from head.message_formatter import (
     split_message,
-    compress_tool_messages,
-    format_activity_message,
-    format_tool_line,
     format_error,
     display_mode,
 )
@@ -44,10 +41,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Heartbeat interval for status updates (seconds)
-HEARTBEAT_INTERVAL = 25
-# Stream update interval (seconds)
-STREAM_UPDATE_INTERVAL = 1.5
+# Heartbeat interval for "Thinking Xs" updates (seconds)
+HEARTBEAT_INTERVAL = 30
 # Max buffer before flushing to a new message
 STREAM_BUFFER_FLUSH_SIZE = 1800
 
@@ -515,14 +510,13 @@ class DiscordAdapter:
 
     async def _heartbeat_loop(self, channel_id: str, start_time: float, event_tracker: dict) -> None:
         """
-        Send periodic status updates every HEARTBEAT_INTERVAL seconds to avoid
-        Discord's 3-minute inactivity feeling.
+        Update the "Thinking Xs" status message every HEARTBEAT_INTERVAL seconds.
+
+        The thinking message is created by the streaming coroutine and stored in
+        self._heartbeat_msgs[channel_id]. This loop only edits it periodically.
 
         event_tracker is a mutable dict shared with the streaming coroutine:
-            - "last_event_type": type of last event received
-            - "tool_name": current tool being used (if any)
             - "done": whether streaming is complete
-            - "partial_len": length of accumulated partial content
         """
         try:
             while not event_tracker.get("done", False):
@@ -532,51 +526,20 @@ class DiscordAdapter:
 
                 elapsed = int(time.time() - start_time)
                 mins, secs = divmod(elapsed, 60)
-
-                last_type = event_tracker.get("last_event_type", "")
-                tool_name = event_tracker.get("tool_name", "")
-                partial_len = event_tracker.get("partial_len", 0)
-
-                if tool_name:
-                    status_text = f"Using tool: **{tool_name}**"
-                elif last_type == "partial" and partial_len > 0:
-                    status_text = "Writing response..."
-                elif last_type in ("tool_use", "tool_result"):
-                    status_text = "Processing tool results..."
-                else:
-                    status_text = "Thinking..."
-
                 time_str = f"{mins}m{secs:02d}s" if mins > 0 else f"{secs}s"
-                heartbeat_text = f"`[{time_str}]` Claude is working... {status_text}"
+                heartbeat_text = f"Thinking {time_str}"
 
-                channel = self._channels.get(channel_id)
-                if not channel:
-                    break
+                existing = self._heartbeat_msgs.get(channel_id)
+                if not existing:
+                    continue
 
                 try:
-                    existing = self._heartbeat_msgs.get(channel_id)
-                    if existing:
-                        await existing.edit(content=heartbeat_text)
-                    else:
-                        msg = await channel.send(heartbeat_text)
-                        self._heartbeat_msgs[channel_id] = msg
+                    await existing.edit(content=heartbeat_text)
                 except discord.HTTPException as e:
                     logger.debug(f"Heartbeat message error: {e}")
-                    try:
-                        msg = await channel.send(heartbeat_text)
-                        self._heartbeat_msgs[channel_id] = msg
-                    except Exception:
-                        pass
 
         except asyncio.CancelledError:
             pass
-        finally:
-            msg = self._heartbeat_msgs.pop(channel_id, None)
-            if msg:
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
 
     # -----------------------------------------------------------------------
     # Internal: message forwarding with heartbeat (Discord-specific)
@@ -584,15 +547,15 @@ class DiscordAdapter:
 
     async def _forward_message_with_heartbeat(self, channel_id: str, text: str, file_refs: list | None = None) -> None:
         """
-        Forward a user message to Claude with typing indicator, heartbeat, and
-        optional file upload.
+        Forward a user message to Claude with a compact "Thinking Xs" indicator.
+
+        Instead of streaming tool calls and partial text, this shows a single
+        "Thinking 0s" message that updates every 30s.  When Claude finishes,
+        the thinking message is replaced with the elapsed time and all result
+        text is concatenated and sent as a single message.
 
         This method lives here (not in the engine) because the heartbeat
-        behaviour is Discord-specific: it posts and edits a status message
-        every HEARTBEAT_INTERVAL seconds using Discord channel objects.
-
-        The method accesses the engine's router, ssh, daemon, and config
-        attributes via self._engine.
+        behaviour is Discord-specific.
         """
         engine = self._engine
         if engine is None:
@@ -611,16 +574,18 @@ class DiscordAdapter:
 
         self._streaming.add(channel_id)
 
+        start_time = time.time()
+
         # Shared state between streaming loop and heartbeat task
-        event_tracker: dict = {
-            "last_event_type": "",
-            "tool_name": "",
-            "done": False,
-            "partial_len": 0,
-        }
+        event_tracker: dict = {"done": False}
 
         await self._start_typing(channel_id)
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop(channel_id, time.time(), event_tracker))
+
+        # Send the initial "Thinking 0s" message and register it for heartbeat edits
+        thinking_msg = await self.send_message(channel_id, "Thinking 0s")
+        self._heartbeat_msgs[channel_id] = thinking_msg
+
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(channel_id, start_time, event_tracker))
 
         try:
             from head.daemon_client import DaemonConnectionError
@@ -635,67 +600,22 @@ class DiscordAdapter:
                     await self.send_message(channel_id, format_error(f"File upload failed: {e}"))
                     return
 
-            # Activity message state (tools + thinking)
-            activity_msg: Optional[MessageHandle] = None
-            activity_lines: list[str] = []
-            thinking_buf: str = ""
-            last_activity_update = time.time()
-
-            STREAM_UPDATE_INTERVAL = 1.5
-
-            async def update_activity():
-                nonlocal activity_msg, activity_lines, last_activity_update
-                content = format_activity_message(activity_lines, thinking_buf, cursor=True)
-                if not content.strip():
-                    return
-                if len(content) > 1900 and activity_msg is not None:
-                    await finalize_activity()
-                    content = format_activity_message(activity_lines, thinking_buf, cursor=True)
-                if activity_msg is None:
-                    activity_msg = await self.send_message(channel_id, content)
-                else:
-                    await self.edit_message(activity_msg, content)
-                last_activity_update = time.time()
-
-            async def finalize_activity():
-                nonlocal activity_msg, activity_lines
-                if activity_msg is not None and activity_lines:
-                    final = format_activity_message(activity_lines, "", cursor=False)
-                    await self.edit_message(activity_msg, final)
-                activity_msg = None
-                activity_lines = []
+            # Accumulate all text results to send at the end
+            result_texts: list[str] = []
 
             async for event in engine.daemon.send_message(local_port, session.daemon_session_id, text):
                 event_type = event.get("type", "")
-                event_tracker["last_event_type"] = event_type
 
                 if event_type == "ping":
                     continue
 
-                if event_type == "tool_use":
-                    tool_name = event.get("tool", "unknown")
-                    event_tracker["tool_name"] = tool_name
-                    activity_lines.append(format_tool_line(event))
-                    thinking_buf = ""
-                    await update_activity()
+                # tool_use and partial events are silently consumed — the
+                # thinking timer is the only visible progress indicator.
 
-                elif event_type == "partial":
+                if event_type == "text":
                     content = event.get("content", "")
                     if content:
-                        thinking_buf += content
-                        event_tracker["partial_len"] = len(thinking_buf)
-                        now = time.time()
-                        if now - last_activity_update >= STREAM_UPDATE_INTERVAL:
-                            await update_activity()
-
-                elif event_type == "text":
-                    content = event.get("content", "")
-                    if content:
-                        thinking_buf = ""
-                        await finalize_activity()
-                        for chunk in split_message(content):
-                            await self.send_message(channel_id, chunk)
-                    event_tracker["partial_len"] = 0
+                        result_texts.append(content)
 
                 elif event_type == "result":
                     sdk_session_id = event.get("session_id")
@@ -727,9 +647,29 @@ class DiscordAdapter:
                     error_msg = event.get("message", "Unknown error")
                     await self.send_message(channel_id, format_error(error_msg))
 
-            # Finalize any remaining activity message
-            thinking_buf = ""
-            await finalize_activity()
+            # --- Stream finished ---
+            elapsed = int(time.time() - start_time)
+            mins, secs = divmod(elapsed, 60)
+            time_str = f"{mins}m{secs:02d}s" if mins > 0 else f"{secs}s"
+
+            # Edit the thinking message to show final elapsed time
+            thinking_ref = self._heartbeat_msgs.get(channel_id)
+            if thinking_ref:
+                try:
+                    await self.edit_message(thinking_ref, f"Done in {time_str}")
+                except Exception:
+                    pass
+
+            # Send all accumulated text as one concatenated message
+            if result_texts:
+                full_text = "\n\n".join(result_texts)
+                for chunk in split_message(full_text):
+                    await self.send_message(channel_id, chunk)
+
+            # Detect and forward files from the complete result
+            if result_texts and engine.file_forward:
+                full_text = "\n\n".join(result_texts)
+                await engine._detect_and_forward_files(channel_id, session.machine_id, full_text)
 
         except DaemonConnectionError as e:
             await self.send_message(channel_id, format_error(f"Lost connection to daemon: {e}"))
@@ -743,6 +683,7 @@ class DiscordAdapter:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+            self._heartbeat_msgs.pop(channel_id, None)
             await self._stop_typing(channel_id)
             self._streaming.discard(channel_id)
 
