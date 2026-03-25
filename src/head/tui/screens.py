@@ -1039,6 +1039,7 @@ class StartDaemonScreen(Screen):
                 )
             if claude_available:
                 menu.add_option(Option("Start daemon", id="start"))
+        menu.add_option(Option("Check for updates", id="check_update"))
         menu.add_option(Option("Back", id="back"))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -1056,6 +1057,45 @@ class StartDaemonScreen(Screen):
             self._install_daemon()
         elif option_id == "update":
             self._update_daemon()
+        elif option_id == "check_update":
+            self._check_for_updates()
+
+    def _check_for_updates(self) -> None:
+        """Query GitHub for the latest release and notify the user."""
+        import threading
+
+        log_widget = self.query_one("#daemon_log", Static)
+        log_widget.update("[dim]Checking GitHub for latest release...[/dim]")
+
+        def _run() -> None:
+            try:
+                from head.daemon_installer import get_current_version, get_latest_release_version
+
+                current = get_current_version()
+                latest = get_latest_release_version()
+
+                if not latest:
+                    msg = "[yellow]Could not reach GitHub — check your network.[/yellow]"
+                elif not current:
+                    msg = f"[dim]Latest release:[/dim] [bold]{latest}[/bold] [dim](current version unknown)[/dim]"
+                elif latest == current:
+                    msg = f"[green]Up to date![/green] Current version: [bold]{current}[/bold]"
+                else:
+                    msg = (
+                        f"[bold yellow]Update available![/bold yellow] "
+                        f"[bold]{current}[/bold] → [bold]{latest}[/bold]\n"
+                        "[dim]Run [bold]pip install --upgrade codecast[/bold] "
+                        "then select 'Update daemon' to apply.[/dim]"
+                    )
+            except Exception as exc:
+                msg = f"[red]Error checking updates: {exc}[/red]"
+
+            try:
+                self.app.call_from_thread(log_widget.update, msg)
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _update_daemon(self) -> None:
         """Stop daemon if running, remove old binary, and re-install."""

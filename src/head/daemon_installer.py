@@ -90,6 +90,25 @@ def get_daemon_version(binary_path: Path | str | None = None) -> str:
         return ""
 
 
+def get_latest_release_version() -> str:
+    """Query GitHub API for the latest release tag and return the version string.
+
+    Returns '' if the request fails or no release is found.
+    """
+    import json
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    try:
+        req = Request(url, headers={"User-Agent": "codecast-installer", "Accept": "application/vnd.github.v3+json"})
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            tag = data.get("tag_name", "")
+            # Strip leading 'v' if present
+            return tag.lstrip("v") if tag else ""
+    except Exception:
+        return ""
+
+
 def get_expected_asset_name() -> str | None:
     """Return the GitHub release asset name for this platform, or None."""
     system = _platform.system().lower()
